@@ -1,3 +1,4 @@
+import asyncio
 from decimal import Decimal
 from django.conf import settings
 from django.db import transaction
@@ -16,7 +17,7 @@ from .serializers import (
     AlertSerializer,
 )
 from scraper.catalog import search_catalog, get_product_from_catalog
-from scraper.engine import scrape_product
+from scraper.engine import scrape_product, scrape_products_batch, ScrapeResult
 
 class PingView(APIView):
     def get(self, request):
@@ -147,7 +148,42 @@ class RunScrapeView(APIView):
             p for p in Product.objects.filter(is_tracked=True)
             if not p.last_scraped_at or (now - p.last_scraped_at).total_seconds() >= p.scrape_interval_minutes * 60
         ]
-        results = [_execute_product_scrape(p) for p in due_products]
+
+        # Generous safety-valve cap (50) purely to bound worst-case runaway backlogs
+        due_products = due_products[:50]
+
+        if not due_products:
+            return Response({
+                "timestamp": now.isoformat(),
+                "scraped_count": 0,
+                "results": []
+            })
+
+        results_by_id = asyncio.run(
+            scrape_products_batch([str(p.source_product_id) for p in due_products], concurrency=4)
+        )
+        results = [
+            _finalize_scrape(
+                p,
+                results_by_id.get(
+                    str(p.source_product_id),
+                    ScrapeResult(
+                        source_product_id=str(p.source_product_id),
+                        product_name=p.name,
+                        price=None,
+                        currency=None,
+                        in_stock=None,
+                        stock_raw=None,
+                        attempts=1,
+                        status="failed",
+                        error_message="Missing batch result",
+                        logs=["Missing batch result"],
+                        elapsed_seconds=0.0
+                    )
+                )
+            )
+            for p in due_products
+        ]
 
         return Response({
             "timestamp": now.isoformat(),
@@ -155,10 +191,9 @@ class RunScrapeView(APIView):
             "results": results
         })
 
-def _execute_product_scrape(product: Product) -> dict:
-    t_start = timezone.now()
-    scrape_res = scrape_product(source_product_id=product.source_product_id, headed=False)
+def _finalize_scrape(product: Product, scrape_res: ScrapeResult) -> dict:
     t_finish = timezone.now()
+    t_start = t_finish - timezone.timedelta(seconds=scrape_res.elapsed_seconds)
 
     with transaction.atomic():
         # 1. ALWAYS record a ScrapeLog row (satisfies honest logging)
@@ -207,6 +242,10 @@ def _execute_product_scrape(product: Product) -> dict:
         "error_message": scrape_res.error_message,
         "log_id": log.id
     }
+
+def _execute_product_scrape(product: Product) -> dict:
+    scrape_res = scrape_product(source_product_id=product.source_product_id, headed=False)
+    return _finalize_scrape(product, scrape_res)
 
 def _check_alerts(product: Product, current_price: Decimal, in_stock: bool):
     active_alerts = product.alerts.filter(notified=False)

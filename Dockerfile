@@ -24,4 +24,4 @@ COPY . /app
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "python backend/manage.py migrate && cd backend && gunicorn tracker_project.wsgi:application --bind 0.0.0.0:${PORT:-8000}"]
+CMD ["sh", "-c", "python backend/manage.py migrate && cd backend && gunicorn tracker_project.wsgi:application --bind 0.0.0.0:${PORT:-8000} --timeout 180 --workers 2 --threads 4"]

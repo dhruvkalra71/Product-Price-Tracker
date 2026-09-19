@@ -3,7 +3,7 @@ from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 from .models import Product, PriceHistory, ScrapeLog
 from scraper.engine import ScrapeResult
@@ -107,21 +107,23 @@ class TrackerAPITests(TestCase):
         resp = self.client.post(reverse("scrape-run"))
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    @patch("tracker.views.scrape_product")
-    def test_cron_scrape_run_authorized_with_secret(self, mock_scrape):
-        mock_scrape.return_value = ScrapeResult(
-            source_product_id="5",
-            product_name="Cron Item",
-            price=999.0,
-            currency="INR",
-            in_stock=True,
-            stock_raw="5 left",
-            attempts=1,
-            status="success",
-            error_message=None,
-            logs=["ok"],
-            elapsed_seconds=2.0
-        )
+    @patch("tracker.views.scrape_products_batch", new_callable=AsyncMock)
+    def test_cron_scrape_run_authorized_with_secret(self, mock_batch):
+        mock_batch.return_value = {
+            "5": ScrapeResult(
+                source_product_id="5",
+                product_name="Cron Item",
+                price=999.0,
+                currency="INR",
+                in_stock=True,
+                stock_raw="5 left",
+                attempts=1,
+                status="success",
+                error_message=None,
+                logs=["ok"],
+                elapsed_seconds=2.0
+            )
+        }
 
         Product.objects.create(
             source_product_id="5",
@@ -137,3 +139,70 @@ class TrackerAPITests(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["scraped_count"], 1)
+        self.assertEqual(len(resp.data["results"]), 1)
+        self.assertEqual(resp.data["results"][0]["price"], 999.0)
+
+    @patch("tracker.views.scrape_products_batch", new_callable=AsyncMock)
+    def test_cron_scrape_batch_multiple_products(self, mock_batch):
+        mock_batch.return_value = {
+            "101": ScrapeResult(
+                source_product_id="101",
+                product_name="Batch Item 1",
+                price=500.0,
+                currency="INR",
+                in_stock=True,
+                stock_raw="In stock",
+                attempts=1,
+                status="success",
+                error_message=None,
+                logs=["ok"],
+                elapsed_seconds=1.5
+            ),
+            "102": ScrapeResult(
+                source_product_id="102",
+                product_name="Batch Item 2",
+                price=None,
+                currency=None,
+                in_stock=None,
+                stock_raw=None,
+                attempts=3,
+                status="failed",
+                error_message="Store error",
+                logs=["fail"],
+                elapsed_seconds=3.0
+            ),
+        }
+
+        Product.objects.create(
+            source_product_id="101",
+            name="Batch Item 1",
+            is_tracked=True,
+            scrape_interval_minutes=60,
+            last_scraped_at=None
+        )
+        Product.objects.create(
+            source_product_id="102",
+            name="Batch Item 2",
+            is_tracked=True,
+            scrape_interval_minutes=60,
+            last_scraped_at=None
+        )
+
+        resp = self.client.post(
+            reverse("scrape-run"),
+            HTTP_X_SCRAPE_SECRET="ine-tracker-cron-secret-2026"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["scraped_count"], 2)
+
+        # Verify product 101 recorded price history
+        p1 = Product.objects.get(source_product_id="101")
+        self.assertEqual(p1.price_history.count(), 1)
+        self.assertEqual(p1.price_history.first().price, Decimal("500.00"))
+        self.assertEqual(p1.logs.count(), 1)
+
+        # Verify product 102 recorded log but NO price history
+        p2 = Product.objects.get(source_product_id="102")
+        self.assertEqual(p2.price_history.count(), 0)
+        self.assertEqual(p2.logs.count(), 1)
+        self.assertEqual(p2.logs.first().status, "failed")
