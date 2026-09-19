@@ -244,63 +244,21 @@ async def scrape_product_async(
     max_retries: int = 3,
     base_url: str = "https://demo.inelabteamdev.com"
 ) -> ScrapeResult:
-    from playwright.async_api import async_playwright
-
-    t_start = time.time()
-    async with async_playwright() as p:
-        browser = None
-        launch_options = {
-            "headless": not headed,
-            "slow_mo": 50 if headed else 0,
-        }
-        
-        if sys.platform == "win32":
-            try:
-                browser = await p.chromium.launch(channel="msedge", **launch_options)
-            except Exception:
-                pass
-                
-        if browser is None:
-            try:
-                browser = await p.chromium.launch(**launch_options)
-            except Exception as e:
-                err = f"Failed to launch browser: {e}"
-                return ScrapeResult(
-                    source_product_id=str(source_product_id),
-                    product_name="",
-                    price=None,
-                    currency=None,
-                    in_stock=None,
-                    stock_raw=None,
-                    attempts=1,
-                    status="failed",
-                    error_message=err,
-                    logs=[err],
-                    elapsed_seconds=round(time.time() - t_start, 2)
-                )
-
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
-        )
-        await context.route(
-            "**/*",
-            lambda route: route.abort()
-            if route.request.resource_type in ("image", "font", "media")
-            else route.continue_()
-        )
-        page = await context.new_page()
-        try:
-            return await _scrape_with_page(page, str(source_product_id), max_retries, base_url)
-        finally:
-            await context.close()
-            await browser.close()
+    results = await scrape_products_batch(
+        [str(source_product_id)],
+        concurrency=1,
+        max_retries=max_retries,
+        base_url=base_url,
+        headless=not headed
+    )
+    return results[str(source_product_id)]
 
 async def scrape_products_batch(
     source_product_ids: List[str],
     concurrency: int = 4,
     max_retries: int = 3,
-    base_url: str = "https://demo.inelabteamdev.com"
+    base_url: str = "https://demo.inelabteamdev.com",
+    headless: bool = True
 ) -> dict:
     from playwright.async_api import async_playwright
 
@@ -314,11 +272,11 @@ async def scrape_products_batch(
         browser = None
         if sys.platform == "win32":
             try:
-                browser = await p.chromium.launch(channel="msedge", headless=True)
+                browser = await p.chromium.launch(channel="msedge", headless=headless)
             except Exception:
                 pass
         if browser is None:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(headless=headless)
 
         async def scrape_one(pid):
             pid_str = str(pid)

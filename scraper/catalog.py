@@ -68,7 +68,4 @@ def get_product_from_catalog(source_product_id: str) -> Optional[dict]:
         pass
 
     # Fallback to catalog scan
-    for item in get_full_catalog(max_pages=10):
-        if item.get("id") == pid:
-            return item
-    return None
+    return next((item for item in get_full_catalog(max_pages=10) if item.get("id") == pid), None)

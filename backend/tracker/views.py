@@ -150,9 +150,7 @@ class RunScrapeView(APIView):
     """
     def post(self, request):
         # 1. Authenticate cron request
-        secret_header = request.headers.get("X-Scrape-Secret") or request.headers.get("Authorization", "")
-        if "Bearer " in secret_header:
-            secret_header = secret_header.replace("Bearer ", "").strip()
+        secret_header = (request.headers.get("X-Scrape-Secret") or request.headers.get("Authorization", "")).removeprefix("Bearer ").strip()
 
         configured_secret = getattr(settings, "SCRAPE_SHARED_SECRET", "")
         if configured_secret and secret_header != configured_secret:
@@ -198,20 +196,19 @@ class RunScrapeView(APIView):
 
         return Response({
             "status": "accepted",
-            "message": "Scrape run started in background",
+            "message": "Background scrape started",
             "due_count": len(due_products),
             "timestamp": now.isoformat()
         }, status=status.HTTP_202_ACCEPTED)
 
-def _run_background_scrape(product_ids: list):
+def _run_background_scrape(product_ids: list[int]):
     """
-    Background worker that iterates due products and records scrapes.
-    Honors SCRAPE_MAX_CONCURRENT (default 1: sequential processing where each
+    Background worker function running in a separate thread.
+    Executes scraping sequentially by default (guaranteeing one Playwright
     browser session fully closes before the next begins).
     Guarantees scrape_lock is released and connection is closed on exit.
     """
     try:
-        from .models import Product
         products = list(Product.objects.filter(id__in=product_ids))
         max_concurrent = int(getattr(settings, "SCRAPE_MAX_CONCURRENT", 1))
 
@@ -223,23 +220,9 @@ def _run_background_scrape(product_ids: list):
                 )
             )
             for p in products:
-                scrape_res = results_by_id.get(
-                    str(p.source_product_id),
-                    ScrapeResult(
-                        source_product_id=str(p.source_product_id),
-                        product_name=p.name,
-                        price=None,
-                        currency=None,
-                        in_stock=None,
-                        stock_raw=None,
-                        attempts=1,
-                        status="failed",
-                        error_message="Missing batch result",
-                        logs=["Missing batch result"],
-                        elapsed_seconds=0.0,
-                    )
-                )
-                _finalize_scrape(p, scrape_res)
+                scrape_res = results_by_id.get(str(p.source_product_id))
+                if scrape_res:
+                    _finalize_scrape(p, scrape_res)
         else:
             # Sequential processing (default baseline: one browser closes before next starts)
             for p in products:
