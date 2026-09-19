@@ -34,28 +34,14 @@ class ScrapeResult:
 def clean_price_string(raw: str) -> Optional[float]:
     if not raw:
         return None
-    # 1. Normalize unicode (handles full-width digits \uff10-\uff19 etc)
+    # 1. Normalize unicode (handles full-width digits etc)
     s = unicodedata.normalize("NFKD", raw)
-    # 2. Strip zero-width spaces, non-breaking spaces, and specific formatting
-    s = s.replace("\u200b", "").replace("\u00a0", " ")
-    # 3. Strip trailing annotations like "/- (incl. of all taxes)"
-    s = re.sub(r"/-\s*\(.*?\)", "", s)
-    s = re.sub(r"/-\s*", "", s)
-    # 4. Remove currency symbols and letters
+    # 2. Keep only digits, commas, and dots
     s = re.sub(r"[^\d,\.]", "", s).strip()
     if not s:
         return None
-    # 5. Handle Indian numbering (e.g. 11,468 or 1,12,839) vs European decimals
-    # If there is a comma and no dot, or comma before dot, remove commas
-    if "," in s and "." in s:
-        if s.rfind(",") > s.rfind("."):
-            # European format: 12.839,00 -> 12839.00
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            # Standard/Indian format: 12,839.00 -> 12839.00
-            s = s.replace(",", "")
-    elif "," in s:
-        s = s.replace(",", "")
+    # 3. Handle Indian numbering vs European decimals
+    s = s.replace(".", "").replace(",", ".") if ("," in s and "." in s and s.rfind(",") > s.rfind(".")) else s.replace(",", "")
     try:
         val = float(s)
         return val if val > 0 else None

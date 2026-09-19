@@ -171,10 +171,7 @@ class RunScrapeView(APIView):
                 output_field=DurationField()
             )
         )
-        due_products = list(
-            Product.objects.filter(is_tracked=True)
-            .filter(due_filter)[:50]
-        )
+        due_products = list(Product.objects.filter(due_filter, is_tracked=True)[:50])
 
         if not due_products:
             scrape_lock.release()

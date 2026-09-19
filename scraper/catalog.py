@@ -41,14 +41,11 @@ def search_catalog(query: str, limit: int = 20) -> List[dict]:
         return get_full_catalog(max_pages=2)[:limit]
 
     items = get_full_catalog(max_pages=10)
-    matches = []
     fields = ("name", "brand", "category", "sku", "id")
-    for item in items:
-        if any(query_clean in str(item.get(k, "")).lower() for k in fields):
-            matches.append(item)
-            if len(matches) >= limit:
-                break
-    return matches
+    return [
+        item for item in items
+        if any(query_clean in str(item.get(k, "")).lower() for k in fields)
+    ][:limit]
 
 @functools.lru_cache(maxsize=128)
 def get_product_from_catalog(source_product_id: str) -> Optional[dict]:
