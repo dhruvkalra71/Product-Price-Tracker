@@ -36,11 +36,13 @@ def clean_price_string(raw: str) -> Optional[float]:
         return None
     # 1. Normalize unicode (handles full-width digits etc)
     s = unicodedata.normalize("NFKD", raw)
-    # 2. Keep only digits, commas, and dots
+    # 2. Strip currency abbreviations (e.g. Rs. or INR) so trailing periods are not mistaken for decimals
+    s = re.sub(r"\b(rs|inr)\b\.?", "", s, flags=re.IGNORECASE)
+    # 3. Keep only digits, commas, and dots
     s = re.sub(r"[^\d,\.]", "", s).strip()
     if not s:
         return None
-    # 3. Handle Indian numbering vs European decimals
+    # 4. Handle Indian numbering vs European decimals
     s = s.replace(".", "").replace(",", ".") if ("," in s and "." in s and s.rfind(",") > s.rfind(".")) else s.replace(",", "")
     try:
         val = float(s)
@@ -52,17 +54,40 @@ COOKIE_SUPPRESSION_CSS = ".cookie-overlay { display: none !important; pointer-ev
 
 async def _neutralize_cookie_overlay(page, log) -> bool:
     """
-    Checks for .cookie-overlay in DOM, records telemetry, and injects CSS
-    so the overlay never intercepts pointer events. Returns True if detected.
+    Checks for .cookie-overlay in DOM, records telemetry, and ensures
+    anti-overlay CSS is applied so the overlay never intercepts pointer events.
+
+    Why both context.add_init_script and page.add_style_tag exist:
+    1. Primary defense: context.add_init_script injects '#anti-overlay-fix' before
+       any document script executes on every navigation and reload.
+    2. Fallback defense: if _scrape_with_page is invoked with a bare page
+       lacking the context init script (e.g. in tests or direct custom contexts),
+       or if SPA framework hydration wipes the document head, this fallback
+       injects the style tag.
+    3. De-duplication: we query document.getElementById('anti-overlay-fix') first,
+       avoiding redundant <style> tags from accumulating across attempts.
     """
+    detected = False
     try:
         count = await page.locator(".cookie-overlay").count()
-        if count > 0:
+        detected = count > 0
+        if detected:
             log(f"[TELEMETRY] Cookie overlay detected in DOM ({count} element(s)) - neutralized via style injection")
-        await page.add_style_tag(content=COOKIE_SUPPRESSION_CSS)
-        return count > 0
-    except Exception:
-        return False
+    except Exception as e:
+        log(f"[WARNING] Failed to query cookie overlay presence: {e}")
+
+    try:
+        has_style = await page.evaluate("() => !!document.getElementById('anti-overlay-fix')")
+        if not has_style:
+            await page.add_style_tag(content=COOKIE_SUPPRESSION_CSS)
+            await page.evaluate("""() => {
+                const s = Array.from(document.querySelectorAll('style')).pop();
+                if (s && !s.id) s.id = 'anti-overlay-fix';
+            }""")
+    except Exception as e:
+        log(f"[WARNING] Failed to inject overlay suppression styles: {e}")
+
+    return detected
 
 async def _scrape_with_page(
     page,
