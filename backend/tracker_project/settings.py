@@ -59,11 +59,12 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "tracker_project.wsgi.application"
 
-# Database: Supabase / Postgres via DATABASE_URL, fallback to local SQLite
+# Database: Supabase / Postgres via DATABASE_URL (Session Pooler on port 5432), fallback to local SQLite
 DATABASES = {
     "default": dj_database_url.config(
         default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
-        conn_max_age=600,
+        conn_max_age=int(os.getenv("CONN_MAX_AGE", "0")),
+        ssl_require=bool(os.getenv("DATABASE_URL")),
     )
 }
 

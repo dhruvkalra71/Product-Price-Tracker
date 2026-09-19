@@ -102,8 +102,9 @@ A lightweight ping endpoint is available at `GET /api/ping`. A cron job hitting 
 | :--- | :--- | :--- | :--- |
 | `DJANGO_SECRET_KEY` | Yes (Prod) | `insecure-dev-key...` | Cryptographic signing secret for Django. |
 | `DJANGO_DEBUG` | No | `True` | Set to `False` in production. |
-| `DATABASE_URL` | No | SQLite (`db.sqlite3`) | Supabase Postgres connection URI (e.g. `postgres://user:pass@host:5432/postgres`). |
+| `DATABASE_URL` | No | SQLite (`db.sqlite3`) | Supabase Session Pooler URI on port 5432 (e.g. `postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres`). Direct `db.<ref>.supabase.co` is IPv6-only and will fail on Render with "Network is unreachable". |
 | `SCRAPE_SHARED_SECRET`| Yes | `ine-tracker-cron-secret-2026` | Secret header key required to invoke `POST /api/scrape/run`. |
+| `CONN_MAX_AGE` | No | `0` | Connection max age (`0` recommended for connection poolers). |
 | `PLAYWRIGHT_BROWSERS_PATH`| Render only | `0` | Forces Playwright to use local container browser path on Render. |
 
 ### Frontend (`frontend/.env` / Vercel environment)
