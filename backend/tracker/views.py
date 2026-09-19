@@ -1,7 +1,10 @@
 import asyncio
+from datetime import timedelta
 from decimal import Decimal
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q, F, ExpressionWrapper, DurationField
+from django.db.models.functions import Now
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
@@ -144,13 +147,16 @@ class RunScrapeView(APIView):
             return Response({"error": "Unauthorized cron trigger"}, status=status.HTTP_401_UNAUTHORIZED)
 
         now = timezone.now()
-        due_products = [
-            p for p in Product.objects.filter(is_tracked=True)
-            if not p.last_scraped_at or (now - p.last_scraped_at).total_seconds() >= p.scrape_interval_minutes * 60
-        ]
-
-        # Generous safety-valve cap (50) purely to bound worst-case runaway backlogs
-        due_products = due_products[:50]
+        due_filter = Q(last_scraped_at__isnull=True) | Q(
+            last_scraped_at__lte=Now() - ExpressionWrapper(
+                F("scrape_interval_minutes") * timedelta(minutes=1),
+                output_field=DurationField()
+            )
+        )
+        due_products = list(
+            Product.objects.filter(is_tracked=True)
+            .filter(due_filter)[:50]
+        )
 
         if not due_products:
             return Response({

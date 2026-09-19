@@ -1,3 +1,4 @@
+import concurrent.futures
 import functools
 import json
 import urllib.request
@@ -25,9 +26,11 @@ def get_full_catalog(max_pages: int = 5) -> List[dict]:
         for item in first_page.get("items", []):
             all_items[item["id"]] = item
 
-        for p in range(2, total_pages + 1):
-            for item in fetch_page(p, page_size=50).get("items", []):
-                all_items[item["id"]] = item
+        if total_pages > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+                for page_data in ex.map(lambda p: fetch_page(p, page_size=50), range(2, total_pages + 1)):
+                    for item in page_data.get("items", []):
+                        all_items[item["id"]] = item
     except Exception:
         pass
     return list(all_items.values())

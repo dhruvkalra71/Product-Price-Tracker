@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import random
 import re
 import sys
 import time
@@ -123,14 +124,15 @@ async def _scrape_with_page(
             await reveal_btn.click()
 
             # 5. Handle chaos click dropper (Xn drops 17.5% of clicks)
-            click_registered = False
-            for poll in range(6):
-                await asyncio.sleep(0.25)
-                classes = await price_block.get_attribute("class") or ""
-                if "price-idle" not in classes:
-                    click_registered = True
-                    log(f"Price block transitioned to state: '{classes}'")
-                    break
+            try:
+                await page.wait_for_function(
+                    """() => !document.querySelector('.price-block').className.includes('price-idle')""",
+                    timeout=1500
+                )
+                click_registered = True
+                log("Price block transitioned out of idle state")
+            except Exception:
+                click_registered = False
 
             if not click_registered:
                 log("[CHAOS DETECTED] Click was dropped by store chaos logic! Re-clicking...")
@@ -213,9 +215,12 @@ async def _scrape_with_page(
         except Exception as e:
             last_error = str(e)
             log(f"Attempt {attempt} failed: {last_error}")
+            base_delay = 2
+            max_delay = 20
             if attempt < max_retries:
-                backoff = 2 * attempt
-                log(f"Backing off for {backoff}s before retry...")
+                exponential = base_delay * (2 ** (attempt - 1))  # 2, 4, 8 for attempts 1, 2, 3
+                backoff = random.uniform(0, min(max_delay, exponential))
+                log(f"Backing off for {backoff:.2f}s before retry (full jitter)...")
                 await asyncio.sleep(backoff)
 
     log(f"All {max_retries} attempts exhausted without success.")
@@ -278,6 +283,12 @@ async def scrape_product_async(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 800}
         )
+        await context.route(
+            "**/*",
+            lambda route: route.abort()
+            if route.request.resource_type in ("image", "font", "media")
+            else route.continue_()
+        )
         page = await context.new_page()
         try:
             return await _scrape_with_page(page, str(source_product_id), max_retries, base_url)
@@ -315,6 +326,12 @@ async def scrape_products_batch(
                 context = await browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     viewport={"width": 1280, "height": 800}
+                )
+                await context.route(
+                    "**/*",
+                    lambda route: route.abort()
+                    if route.request.resource_type in ("image", "font", "media")
+                    else route.continue_()
                 )
                 page = await context.new_page()
                 try:
