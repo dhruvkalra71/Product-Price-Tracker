@@ -1,9 +1,8 @@
 services:
   - type: web
     name: ine-product-price-tracker-backend
-    runtime: python
-    buildCommand: "pip install -r backend/requirements.txt && python -m playwright install --with-deps chromium && python backend/manage.py migrate"
-    startCommand: "cd backend && gunicorn tracker_project.wsgi:application --bind 0.0.0.0:$PORT"
+    runtime: docker
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: DJANGO_DEBUG
         value: "False"
