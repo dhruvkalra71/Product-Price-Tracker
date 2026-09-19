@@ -131,8 +131,10 @@ Detailed technical findings and deobfuscated source excerpts are documented in [
 
 ---
 
-## Live Deployment Links
+## Repository & Deployment
 
+- **GitHub Repository:** [https://github.com/dhruvkalra71/Product-Price-Tracker](https://github.com/dhruvkalra71/Product-Price-Tracker)
 - **Frontend (Vercel):** *Deploy from `frontend/` with `VITE_API_BASE_URL` pointing to backend.*
 - **Backend (Render):** *Deploy blueprint using `render.yaml` or Docker/Python runtime with `Procfile`.*
 - **Database (Supabase):** *Set `DATABASE_URL` in backend environment.*
+
