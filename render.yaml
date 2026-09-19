@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: ine-product-price-tracker-backend
+    runtime: python
+    buildCommand: "pip install -r backend/requirements.txt && python -m playwright install --with-deps chromium && python backend/manage.py migrate"
+    startCommand: "cd backend && gunicorn tracker_project.wsgi:application --bind 0.0.0.0:$PORT"
+    envVars:
+      - key: DJANGO_DEBUG
+        value: "False"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: SCRAPE_SHARED_SECRET
+        sync: false
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: "0"

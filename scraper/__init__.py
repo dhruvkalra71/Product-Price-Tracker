@@ -1,0 +1,3 @@
+"""
+INE Store Scraper Module
+"""
