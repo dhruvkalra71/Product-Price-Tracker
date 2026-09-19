@@ -229,3 +229,29 @@ class TrackerAPITests(TestCase):
         self.assertEqual(p2.price_history.count(), 0)
         self.assertEqual(p2.logs.count(), 1)
         self.assertEqual(p2.logs.first().status, "failed")
+
+    @patch("tracker.views.scrape_product")
+    def test_scrape_log_records_overlay_detected_telemetry(self, mock_scrape):
+        mock_scrape.return_value = ScrapeResult(
+            source_product_id="401",
+            product_name="Overlay Product",
+            price=1500.0,
+            currency="INR",
+            in_stock=True,
+            stock_raw="In stock",
+            attempts=1,
+            status="success",
+            error_message=None,
+            logs=["[TELEMETRY] Cookie overlay detected in DOM (1 element(s))"],
+            elapsed_seconds=3.2,
+            overlay_detected=True
+        )
+
+        resp = self.client.post(reverse("product-track"), {
+            "source_product_id": "401",
+            "scrape_now": True
+        })
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        product = Product.objects.get(source_product_id="401")
+        log = product.logs.first()
+        self.assertTrue(log.http_or_dom_detail.get("overlay_detected"))

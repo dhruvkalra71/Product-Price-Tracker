@@ -29,6 +29,7 @@ class ScrapeResult:
     error_message: Optional[str]
     logs: List[str]
     elapsed_seconds: float
+    overlay_detected: bool = False
 
 def clean_price_string(raw: str) -> Optional[float]:
     if not raw:
@@ -61,6 +62,22 @@ def clean_price_string(raw: str) -> Optional[float]:
     except ValueError:
         return None
 
+COOKIE_SUPPRESSION_CSS = ".cookie-overlay { display: none !important; pointer-events: none !important; }"
+
+async def _neutralize_cookie_overlay(page, log) -> bool:
+    """
+    Checks for .cookie-overlay in DOM, records telemetry, and injects CSS
+    so the overlay never intercepts pointer events. Returns True if detected.
+    """
+    try:
+        count = await page.locator(".cookie-overlay").count()
+        if count > 0:
+            log(f"[TELEMETRY] Cookie overlay detected in DOM ({count} element(s)) - neutralized via style injection")
+        await page.add_style_tag(content=COOKIE_SUPPRESSION_CSS)
+        return count > 0
+    except Exception:
+        return False
+
 async def _scrape_with_page(
     page,
     source_product_id: str,
@@ -80,13 +97,18 @@ async def _scrape_with_page(
     product_name = ""
     last_error: Optional[str] = None
     target_url = f"{base_url}/product/{source_product_id}"
+    overlay_detected = False
 
     for attempt in range(1, max_retries + 1):
         log(f"--- Attempt {attempt} of {max_retries} ---")
         try:
             log(f"Navigating to {target_url} ...")
             await page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
-            
+
+            # Pre-emptive neutralization & detection on load/reload
+            if await _neutralize_cookie_overlay(page, log):
+                overlay_detected = True
+
             # 1. Wait for product title
             await page.wait_for_selector("h1", timeout=10000)
             product_name = (await page.locator("h1").inner_text()).strip()
@@ -118,6 +140,10 @@ async def _scrape_with_page(
                 for step in range(8):
                     await asyncio.sleep(0.08)
                     await page.mouse.move(start_x - (step * 6), start_y + ((step % 2) * 4))
+
+            # Defensive re-check before click (cookie banner can trigger asynchronously on timer during dwell)
+            if await _neutralize_cookie_overlay(page, log):
+                overlay_detected = True
 
             # 4. Click reveal button
             log("Clicking 'Reveal price' button...")
@@ -209,7 +235,8 @@ async def _scrape_with_page(
                     status=status,
                     error_message=None,
                     logs=logs,
-                    elapsed_seconds=round(time.time() - t_start, 2)
+                    elapsed_seconds=round(time.time() - t_start, 2),
+                    overlay_detected=overlay_detected
                 )
 
         except Exception as e:
@@ -235,7 +262,8 @@ async def _scrape_with_page(
         status="failed",
         error_message=last_error or "Retries exhausted",
         logs=logs,
-        elapsed_seconds=round(time.time() - t_start, 2)
+        elapsed_seconds=round(time.time() - t_start, 2),
+        overlay_detected=overlay_detected
     )
 
 async def scrape_product_async(
@@ -285,6 +313,20 @@ async def scrape_products_batch(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     viewport={"width": 1280, "height": 800}
                 )
+                await context.add_init_script("""
+                    (() => {
+                        const style = document.createElement('style');
+                        style.id = 'anti-overlay-fix';
+                        style.textContent = '.cookie-overlay { display: none !important; pointer-events: none !important; }';
+                        if (document.head) {
+                            document.head.appendChild(style);
+                        } else {
+                            document.addEventListener('DOMContentLoaded', () => {
+                                if (document.head) document.head.appendChild(style);
+                            });
+                        }
+                    })();
+                """)
                 await context.route(
                     "**/*",
                     lambda route: route.abort()

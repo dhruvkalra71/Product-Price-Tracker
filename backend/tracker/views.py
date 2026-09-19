@@ -253,6 +253,7 @@ def _finalize_scrape(product: Product, scrape_res: ScrapeResult) -> dict:
                 "logs": scrape_res.logs,
                 "elapsed_seconds": scrape_res.elapsed_seconds,
                 "stock_raw": scrape_res.stock_raw,
+                "overlay_detected": getattr(scrape_res, "overlay_detected", False),
             }
         )
 
