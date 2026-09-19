@@ -107,24 +107,8 @@ class TrackerAPITests(TestCase):
         resp = self.client.post(reverse("scrape-run"))
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    @patch("tracker.views.scrape_products_batch", new_callable=AsyncMock)
-    def test_cron_scrape_run_authorized_with_secret(self, mock_batch):
-        mock_batch.return_value = {
-            "5": ScrapeResult(
-                source_product_id="5",
-                product_name="Cron Item",
-                price=999.0,
-                currency="INR",
-                in_stock=True,
-                stock_raw="5 left",
-                attempts=1,
-                status="success",
-                error_message=None,
-                logs=["ok"],
-                elapsed_seconds=2.0
-            )
-        }
-
+    @patch("tracker.views._run_background_scrape")
+    def test_cron_scrape_run_authorized_with_secret(self, mock_worker):
         Product.objects.create(
             source_product_id="5",
             name="Cron Item",
@@ -137,16 +121,68 @@ class TrackerAPITests(TestCase):
             reverse("scrape-run"),
             HTTP_X_SCRAPE_SECRET="ine-tracker-cron-secret-2026"
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data["scraped_count"], 1)
-        self.assertEqual(len(resp.data["results"]), 1)
-        self.assertEqual(resp.data["results"][0]["price"], 999.0)
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(resp.data["status"], "accepted")
+        self.assertEqual(resp.data["due_count"], 1)
+
+    def test_cron_scrape_run_already_running_returns_409(self):
+        from tracker.views import scrape_lock
+        scrape_lock.acquire()
+        try:
+            resp = self.client.post(
+                reverse("scrape-run"),
+                HTTP_X_SCRAPE_SECRET="ine-tracker-cron-secret-2026"
+            )
+            self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+            self.assertEqual(resp.data["status"], "already_running")
+        finally:
+            scrape_lock.release()
+
+    @patch("tracker.views.scrape_product")
+    def test_background_worker_sequential_execution(self, mock_scrape):
+        from tracker.views import _run_background_scrape, scrape_lock
+
+        mock_scrape.return_value = ScrapeResult(
+            source_product_id="201",
+            product_name="Seq Item",
+            price=750.0,
+            currency="INR",
+            in_stock=True,
+            stock_raw="In stock",
+            attempts=1,
+            status="success",
+            error_message=None,
+            logs=["ok"],
+            elapsed_seconds=1.0
+        )
+
+        p = Product.objects.create(
+            source_product_id="201",
+            name="Seq Item",
+            is_tracked=True,
+            scrape_interval_minutes=60,
+            last_scraped_at=None
+        )
+
+        scrape_lock.acquire()
+        _run_background_scrape([p.id])
+
+        # Verify lock was released in finally
+        self.assertFalse(scrape_lock.locked())
+
+        # Verify database was written
+        p.refresh_from_db()
+        self.assertEqual(p.price_history.count(), 1)
+        self.assertEqual(p.price_history.first().price, Decimal("750.00"))
+        self.assertEqual(p.logs.count(), 1)
 
     @patch("tracker.views.scrape_products_batch", new_callable=AsyncMock)
-    def test_cron_scrape_batch_multiple_products(self, mock_batch):
+    def test_background_worker_concurrent_execution(self, mock_batch):
+        from tracker.views import _run_background_scrape, scrape_lock
+
         mock_batch.return_value = {
-            "101": ScrapeResult(
-                source_product_id="101",
+            "301": ScrapeResult(
+                source_product_id="301",
                 product_name="Batch Item 1",
                 price=500.0,
                 currency="INR",
@@ -158,8 +194,8 @@ class TrackerAPITests(TestCase):
                 logs=["ok"],
                 elapsed_seconds=1.5
             ),
-            "102": ScrapeResult(
-                source_product_id="102",
+            "302": ScrapeResult(
+                source_product_id="302",
                 product_name="Batch Item 2",
                 price=None,
                 currency=None,
@@ -173,36 +209,23 @@ class TrackerAPITests(TestCase):
             ),
         }
 
-        Product.objects.create(
-            source_product_id="101",
-            name="Batch Item 1",
-            is_tracked=True,
-            scrape_interval_minutes=60,
-            last_scraped_at=None
-        )
-        Product.objects.create(
-            source_product_id="102",
-            name="Batch Item 2",
-            is_tracked=True,
-            scrape_interval_minutes=60,
-            last_scraped_at=None
-        )
+        p1 = Product.objects.create(source_product_id="301", name="Batch Item 1", is_tracked=True)
+        p2 = Product.objects.create(source_product_id="302", name="Batch Item 2", is_tracked=True)
 
-        resp = self.client.post(
-            reverse("scrape-run"),
-            HTTP_X_SCRAPE_SECRET="ine-tracker-cron-secret-2026"
-        )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data["scraped_count"], 2)
+        scrape_lock.acquire()
+        with self.settings(SCRAPE_MAX_CONCURRENT=2):
+            _run_background_scrape([p1.id, p2.id])
 
-        # Verify product 101 recorded price history
-        p1 = Product.objects.get(source_product_id="101")
+        # Verify lock released
+        self.assertFalse(scrape_lock.locked())
+
+        # Verify p1 recorded price history
+        p1.refresh_from_db()
         self.assertEqual(p1.price_history.count(), 1)
         self.assertEqual(p1.price_history.first().price, Decimal("500.00"))
-        self.assertEqual(p1.logs.count(), 1)
 
-        # Verify product 102 recorded log but NO price history
-        p2 = Product.objects.get(source_product_id="102")
+        # Verify p2 recorded log but NO price history
+        p2.refresh_from_db()
         self.assertEqual(p2.price_history.count(), 0)
         self.assertEqual(p2.logs.count(), 1)
         self.assertEqual(p2.logs.first().status, "failed")

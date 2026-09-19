@@ -86,11 +86,15 @@ Because free-tier hosting (Render) sleeps after inactivity, the scraping engine 
    ```http
    X-Scrape-Secret: <SCRAPE_SHARED_SECRET>
    ```
-4. The endpoint queries products due for scraping (`now - last_scraped_at >= interval`), scrapes each via Playwright, and commits logs and price records.
-5. Recommended schedule on cron-job.org: **Every 15 minutes** (or every 2 hours).
+4. **Asynchronous Execution:** The endpoint validates auth, checks an in-process lock (`threading.Lock`), queries due products, launches scraping in a background thread, and returns `202 Accepted` immediately (`due_count`) without waiting for browser execution.
+5. **Overlap Protection:** If a scrape run is already in progress when another cron call fires, the endpoint returns `409 Conflict` (`already_running`) instead of launching duplicate browser sessions.
+6. **Concurrency Cap:** Controlled by `SCRAPE_MAX_CONCURRENT` (default: `1`, sequential processing where one product's browser session fully closes before the next begins) to protect against memory exhaustion on 512MB free-tier instances.
+7. Recommended schedule on cron-job.org: **Every 15 minutes** (or every 2 hours).
 
-### Keep-Warm Ping:
-A lightweight ping endpoint is available at `GET /api/ping`. A cron job hitting this endpoint every 10 minutes keeps the Render instance warm before scrape runs.
+### Keep-Warm Ping (Crucial for Cold Start Mitigation):
+A trivial, independent keep-warm endpoint is available at `GET /api/ping`. A separate cron job hitting this endpoint **every 10 minutes** keeps the Render instance warm.
+> [!NOTE]
+> Automated scrape reliability depends on the Render instance already being warm when `/api/scrape/run` fires. Configuring this 10-minute ping job is essential to eliminate cold-start wake-up delays.
 
 ---
 
@@ -104,6 +108,7 @@ A lightweight ping endpoint is available at `GET /api/ping`. A cron job hitting 
 | `DJANGO_DEBUG` | No | `True` | Set to `False` in production. |
 | `DATABASE_URL` | No | SQLite (`db.sqlite3`) | Supabase Session Pooler URI on port 5432 (e.g. `postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres`). Direct `db.<ref>.supabase.co` is IPv6-only and will fail on Render with "Network is unreachable". |
 | `SCRAPE_SHARED_SECRET`| Yes | `ine-tracker-cron-secret-2026` | Secret header key required to invoke `POST /api/scrape/run`. |
+| `SCRAPE_MAX_CONCURRENT`| No | `1` | Max concurrent Playwright browser sessions (default: `1` sequential for safe 512MB RAM usage). |
 | `CONN_MAX_AGE` | No | `0` | Connection max age (`0` recommended for connection poolers). |
 | `PLAYWRIGHT_BROWSERS_PATH`| Render only | `0` | Forces Playwright to use local container browser path on Render. |
 

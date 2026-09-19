@@ -1,8 +1,9 @@
 import asyncio
 from datetime import timedelta
 from decimal import Decimal
+import threading
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Q, F, ExpressionWrapper, DurationField
 from django.db.models.functions import Now
 from django.shortcuts import get_object_or_404
@@ -22,7 +23,16 @@ from .serializers import (
 from scraper.catalog import search_catalog, get_product_from_catalog
 from scraper.engine import scrape_product, scrape_products_batch, ScrapeResult
 
+# In-memory lock to prevent overlapping background scrape runs
+scrape_lock = threading.Lock()
+
 class PingView(APIView):
+    """
+    Lightweight keep-warm endpoint.
+    Should be pinged every ~10 minutes via a separate cron job (e.g. on cron-job.org)
+    to keep free-tier Render containers warm. Automated scrape reliability on
+    /api/scrape/run depends on the instance already being warm when the scrape cron fires.
+    """
     def get(self, request):
         return Response({"status": "ok", "timestamp": timezone.now().isoformat()})
 
@@ -134,10 +144,12 @@ class ManualScrapeView(APIView):
 class RunScrapeView(APIView):
     """
     Cron entry point. Auth-protected by X-Scrape-Secret header.
-    Iterates products where is_tracked=True and due for scraping.
+    Validates secret, acquires non-blocking scrape_lock, queries due products,
+    spawns a background thread to execute the scrape asynchronously,
+    and returns 202 Accepted immediately.
     """
     def post(self, request):
-        # Authenticate cron request
+        # 1. Authenticate cron request
         secret_header = request.headers.get("X-Scrape-Secret") or request.headers.get("Authorization", "")
         if "Bearer " in secret_header:
             secret_header = secret_header.replace("Bearer ", "").strip()
@@ -146,6 +158,14 @@ class RunScrapeView(APIView):
         if configured_secret and secret_header != configured_secret:
             return Response({"error": "Unauthorized cron trigger"}, status=status.HTTP_401_UNAUTHORIZED)
 
+        # 2. Acquire in-process lock to prevent overlapping runs
+        if not scrape_lock.acquire(blocking=False):
+            return Response(
+                {"status": "already_running", "message": "Scrape run currently in progress"},
+                status=status.HTTP_409_CONFLICT
+            )
+
+        # 3. Query due products (cheap DB read)
         now = timezone.now()
         due_filter = Q(last_scraped_at__isnull=True) | Q(
             last_scraped_at__lte=Now() - ExpressionWrapper(
@@ -159,19 +179,51 @@ class RunScrapeView(APIView):
         )
 
         if not due_products:
+            scrape_lock.release()
             return Response({
-                "timestamp": now.isoformat(),
-                "scraped_count": 0,
-                "results": []
-            })
+                "status": "idle",
+                "message": "No products currently due for scraping",
+                "due_count": 0,
+                "timestamp": now.isoformat()
+            }, status=status.HTTP_200_OK)
 
-        results_by_id = asyncio.run(
-            scrape_products_batch([str(p.source_product_id) for p in due_products], concurrency=4)
+        # 4. Spawn background worker thread and return 202 Accepted immediately
+        product_ids = [p.id for p in due_products]
+        thread = threading.Thread(
+            target=_run_background_scrape,
+            args=(product_ids,),
+            daemon=True
         )
-        results = [
-            _finalize_scrape(
-                p,
-                results_by_id.get(
+        thread.start()
+
+        return Response({
+            "status": "accepted",
+            "message": "Scrape run started in background",
+            "due_count": len(due_products),
+            "timestamp": now.isoformat()
+        }, status=status.HTTP_202_ACCEPTED)
+
+def _run_background_scrape(product_ids: list):
+    """
+    Background worker that iterates due products and records scrapes.
+    Honors SCRAPE_MAX_CONCURRENT (default 1: sequential processing where each
+    browser session fully closes before the next begins).
+    Guarantees scrape_lock is released and connection is closed on exit.
+    """
+    try:
+        from .models import Product
+        products = list(Product.objects.filter(id__in=product_ids))
+        max_concurrent = int(getattr(settings, "SCRAPE_MAX_CONCURRENT", 1))
+
+        if max_concurrent > 1:
+            results_by_id = asyncio.run(
+                scrape_products_batch(
+                    [str(p.source_product_id) for p in products],
+                    concurrency=max_concurrent
+                )
+            )
+            for p in products:
+                scrape_res = results_by_id.get(
                     str(p.source_product_id),
                     ScrapeResult(
                         source_product_id=str(p.source_product_id),
@@ -184,18 +236,22 @@ class RunScrapeView(APIView):
                         status="failed",
                         error_message="Missing batch result",
                         logs=["Missing batch result"],
-                        elapsed_seconds=0.0
+                        elapsed_seconds=0.0,
                     )
                 )
-            )
-            for p in due_products
-        ]
-
-        return Response({
-            "timestamp": now.isoformat(),
-            "scraped_count": len(due_products),
-            "results": results
-        })
+                _finalize_scrape(p, scrape_res)
+        else:
+            # Sequential processing (default baseline: one browser closes before next starts)
+            for p in products:
+                try:
+                    _execute_product_scrape(p)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    finally:
+        connection.close()
+        scrape_lock.release()
 
 def _finalize_scrape(product: Product, scrape_res: ScrapeResult) -> dict:
     t_finish = timezone.now()

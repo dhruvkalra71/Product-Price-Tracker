@@ -95,3 +95,6 @@ REST_FRAMEWORK = {
 
 # Shared secret for cron authentication
 SCRAPE_SHARED_SECRET = os.getenv("SCRAPE_SHARED_SECRET", "ine-tracker-cron-secret-2026")
+
+# Concurrency limit for background automated scraping (default: 1 sequential for safe 512MB RAM usage)
+SCRAPE_MAX_CONCURRENT = int(os.getenv("SCRAPE_MAX_CONCURRENT", "1"))
