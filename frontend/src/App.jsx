@@ -58,6 +58,24 @@ export default function App() {
   const [priceUpdates, setPriceUpdates] = useState({});
   const previousPricesRef = useRef({});
 
+  // Theme state
+  const [theme, setTheme] = useState(() => {
+    const saved = localStorage.getItem('theme');
+    if (saved) return saved;
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+      ? 'dark'
+      : 'light';
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
+  };
+
   const loadTrackedProducts = async ({ silent = false } = {}) => {
     if (!silent) {
       setLoading(true);
@@ -274,20 +292,31 @@ export default function App() {
           </div>
         </div>
 
-        <nav className="nav-tabs">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+          <nav className="nav-tabs">
+            <button
+              className={`tab-btn ${activeTab === 'dashboard' ? 'active' : ''}`}
+              onClick={() => setActiveTab('dashboard')}
+            >
+              Tracked Dashboard ({trackedProducts.length})
+            </button>
+            <button
+              className={`tab-btn ${activeTab === 'search' ? 'active' : ''}`}
+              onClick={() => setActiveTab('search')}
+            >
+              Search Store
+            </button>
+          </nav>
+
           <button
-            className={`tab-btn ${activeTab === 'dashboard' ? 'active' : ''}`}
-            onClick={() => setActiveTab('dashboard')}
+            className="theme-toggle-btn"
+            onClick={toggleTheme}
+            title={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
+            aria-label="Toggle theme"
           >
-            Tracked Dashboard ({trackedProducts.length})
+            {theme === 'light' ? '🌙 Dark' : '☀️ Light'}
           </button>
-          <button
-            className={`tab-btn ${activeTab === 'search' ? 'active' : ''}`}
-            onClick={() => setActiveTab('search')}
-          >
-            Search Store
-          </button>
-        </nav>
+        </div>
       </header>
 
       {error && (
@@ -312,7 +341,7 @@ export default function App() {
           {loading && <p style={{ color: 'var(--text-muted)' }}>Loading tracked items...</p>}
 
           {!loading && trackedProducts.length === 0 && (
-            <div style={{ textAlign: 'center', padding: '4rem 1rem', background: 'white', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+            <div style={{ textAlign: 'center', padding: '4rem 1rem', background: 'var(--bg-card)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
               <h2 style={{ fontSize: '1.25rem', marginBottom: '0.5rem' }}>No Tracked Products Yet</h2>
               <p style={{ color: 'var(--text-muted)', marginBottom: '1.5rem' }}>
                 Search INE's mock storefront catalog to pick products and start monitoring their price history.
@@ -554,7 +583,7 @@ export default function App() {
             </div>
 
             {/* Quick stats banner */}
-            <div style={{ display: 'flex', gap: '2rem', padding: '1rem', background: '#f8fafc', borderRadius: '8px', marginBottom: '1.5rem' }}>
+            <div style={{ display: 'flex', gap: '2rem', padding: '1rem', background: 'var(--alert-item-bg)', border: '1px solid var(--border)', borderRadius: '8px', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
               <div>
                 <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Latest Price</div>
                 <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>
@@ -612,25 +641,31 @@ export default function App() {
                 {productDetail.price_history?.length > 0 ? (
                   <ResponsiveContainer>
                     <LineChart data={[...productDetail.price_history].reverse()}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <CartesianGrid strokeDasharray="3 3" stroke={theme === 'dark' ? '#1f293d' : '#e2e8f0'} />
                       <XAxis
                         dataKey="scraped_at"
                         tickFormatter={(t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        stroke="#64748b"
+                        stroke={theme === 'dark' ? '#94a3b8' : '#64748b'}
                       />
                       <YAxis
-                        stroke="#64748b"
+                        stroke={theme === 'dark' ? '#94a3b8' : '#64748b'}
                         domain={['auto', 'auto']}
                         tickFormatter={(v) => `₹${v}`}
                       />
                       <Tooltip
+                        contentStyle={{
+                          backgroundColor: theme === 'dark' ? '#111827' : '#ffffff',
+                          borderColor: theme === 'dark' ? '#1f293d' : '#e2e8f0',
+                          color: theme === 'dark' ? '#f1f5f9' : '#0f172a',
+                          borderRadius: '8px',
+                        }}
                         formatter={(val) => [`₹${val}`, 'Price']}
                         labelFormatter={(lbl) => new Date(lbl).toLocaleString()}
                       />
                       <Line
                         type="monotone"
                         dataKey="price"
-                        stroke="#2563eb"
+                        stroke="#3b82f6"
                         strokeWidth={2}
                         dot={{ r: 4 }}
                         activeDot={{ r: 6 }}
@@ -782,7 +817,7 @@ export default function App() {
               </div>
 
               {showCustomInput && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#f8fafc', padding: '0.65rem 0.85rem', borderRadius: '6px', border: '1px solid var(--border)', marginBottom: '0.75rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'var(--alert-item-bg)', padding: '0.65rem 0.85rem', borderRadius: '6px', border: '1px solid var(--border)', marginBottom: '0.75rem' }}>
                   <span style={{ fontSize: '0.85rem', color: 'var(--text-main)' }}>Custom interval in minutes (min 5):</span>
                   <input
                     type="number"
