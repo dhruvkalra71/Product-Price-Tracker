@@ -104,6 +104,25 @@ class SearchView(APIView):
 
 class ProductListView(APIView):
     def get(self, request):
+        # Auto-heal orphaned tracked products that have never been scraped and have no queued/running job
+        orphans = Product.objects.filter(
+            is_tracked=True,
+            price_history__isnull=True
+        ).exclude(
+            scrape_jobs__status__in=["queued", "running"]
+        ).exclude(
+            logs__status="failed"
+        ).distinct()
+
+        if orphans.exists():
+            is_test = getattr(settings, "TESTING", False) or "test" in sys.argv
+            for orphan in orphans:
+                job = enqueue_scrape_job(orphan, job_type="initial")
+                if is_test:
+                    _process_single_job(job)
+            if not is_test:
+                _trigger_queue_worker()
+
         products = Product.objects.filter(is_tracked=True).prefetch_related("price_history", "logs", "alerts")
         serializer = ProductSerializer(products, many=True)
         return Response(serializer.data)
@@ -224,6 +243,15 @@ class AlertConfigView(APIView):
 class ManualScrapeView(APIView):
     def post(self, request, pk):
         product = get_object_or_404(Product, pk=pk)
+        if request.data.get("enqueue", False):
+            job = enqueue_scrape_job(product, job_type="manual")
+            is_test = getattr(settings, "TESTING", False) or "test" in sys.argv
+            if is_test:
+                _process_single_job(job)
+            else:
+                _trigger_queue_worker()
+            return Response({"status": "queued", "message": "Scrape enqueued in FIFO queue"}, status=status.HTTP_202_ACCEPTED)
+
         if not scrape_lock.acquire(blocking=False):
             return Response(
                 {"error": "A scrape is already in progress. Please try again shortly."},

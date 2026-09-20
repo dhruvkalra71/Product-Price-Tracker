@@ -41,9 +41,10 @@ export const api = {
     request(`/api/products/${id}/track`, {
       method: 'DELETE',
     }),
-  triggerScrape: (id) =>
+  triggerScrape: (id, enqueue = false) =>
     request(`/api/scrape/single/${id}`, {
       method: 'POST',
+      body: JSON.stringify({ enqueue }),
     }),
   addAlert: (id, type, threshold) =>
     request(`/api/products/${id}/alerts`, {

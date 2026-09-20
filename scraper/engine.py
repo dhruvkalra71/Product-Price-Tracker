@@ -192,21 +192,25 @@ async def _scrape_with_page(
             log("Clicking 'Reveal price' button...")
             await reveal_btn.click(timeout=8000)
 
-            # 5. Handle chaos click dropper (Xn drops 17.5% of clicks)
-            # Legitimate clicks transition state within ~50-100ms; timeout=500ms quickly catches dropped clicks
-            try:
-                await page.wait_for_function(
-                    "() => !document.querySelector('.price-block')?.classList.contains('price-idle')",
-                    timeout=500
-                )
-                log("Price block transitioned out of idle state")
-            except Exception:
-                log("[CHAOS DETECTED] Click was dropped by store chaos logic! Re-clicking...")
-                await reveal_btn.click(timeout=8000)
+            # 5. Handle chaos click dropper (Xn drops 17.5% of clicks, delays 17.5% by 900ms)
+            for click_try in range(3):
+                try:
+                    await page.wait_for_function(
+                        "() => !document.querySelector('.price-block')?.classList.contains('price-idle')",
+                        timeout=1100
+                    )
+                    log("Price block transitioned out of idle state")
+                    break
+                except Exception:
+                    if click_try < 2:
+                        log(f"[CHAOS DETECTED] Click was dropped by store chaos logic (try {click_try+1})! Re-clicking...")
+                        await reveal_btn.click(timeout=8000)
+                    else:
+                        log("Price block still in idle state after re-clicks; waiting for resolution...")
 
-            # 6. Wait for price-success or price-error
+            # 6. Wait for price-success or price-error (up to 35s to allow store's in-page 6-attempt 503 retry loop to complete)
             log("Waiting for price quote resolution (WASM + API exchange)...")
-            await page.wait_for_selector(".price-success, .price-error", timeout=15000)
+            await page.wait_for_selector(".price-success, .price-error", timeout=35000)
             final_classes = await price_block.get_attribute("class") or ""
 
             if "price-error" in final_classes:

@@ -302,17 +302,18 @@ export default function App() {
     }
   };
 
-  const handleManualScrape = async (id) => {
+  const handleManualScrape = async (id, enqueue = false) => {
     setScrapingId(id);
     try {
-      await api.triggerScrape(id);
+      await api.triggerScrape(id, enqueue);
       await loadTrackedProducts();
       if (selectedProduct?.id === id) {
         const detail = await api.getProductDetail(id);
         setProductDetail(detail);
       }
     } catch (err) {
-      alert(`Scrape error: ${err.message}`);
+      alert(`Scrape notification: ${err.message}`);
+      await loadTrackedProducts();
     } finally {
       setScrapingId(null);
     }
@@ -489,7 +490,7 @@ export default function App() {
                                 style={{ padding: '0.2rem 0.6rem', fontSize: '0.75rem' }}
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  handleManualScrape(p.id);
+                                  handleManualScrape(p.id, true);
                                 }}
                                 disabled={scrapingId === p.id}
                               >
@@ -560,7 +561,7 @@ export default function App() {
                     <button
                       className="btn btn-secondary btn-sm"
                       disabled={scrapingId === p.id}
-                      onClick={() => handleManualScrape(p.id)}
+                      onClick={() => handleManualScrape(p.id, p.latest_price == null)}
                     >
                       {scrapingId === p.id ? 'Scraping...' : 'Scrape Now'}
                     </button>
