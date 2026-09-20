@@ -110,7 +110,7 @@ A trivial, independent keep-warm endpoint is available at `GET /api/ping`. A sep
 | `SCRAPE_SHARED_SECRET`| Yes | `ine-tracker-cron-secret-2026` | Secret header key required to invoke `POST /api/scrape/run`. |
 | `SCRAPE_MAX_CONCURRENT`| No | `1` | Max concurrent Playwright browser sessions (default: `1` sequential for safe 512MB RAM usage). |
 | `CONN_MAX_AGE` | No | `0` | Connection max age (`0` recommended for connection poolers). |
-| `PLAYWRIGHT_BROWSERS_PATH`| Render only | `0` | Forces Playwright to use local container browser path on Render. |
+| `PLAYWRIGHT_BROWSERS_PATH`| Render only | `/ms-playwright` | Forces Playwright to use local container browser path on Render. |
 
 ### Frontend (`frontend/.env` / Vercel environment)
 

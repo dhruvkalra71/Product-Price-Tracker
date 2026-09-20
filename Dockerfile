@@ -2,7 +2,8 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PORT=8000
+    PORT=8000 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 WORKDIR /app
 
@@ -16,8 +17,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Install Playwright Chromium and required OS dependencies as root
-RUN python -m playwright install --with-deps chromium
+# Install Playwright Chromium and required OS dependencies into PLAYWRIGHT_BROWSERS_PATH
+RUN apt-get update && python -m playwright install --with-deps chromium \
+    && chmod -R 777 /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy application source
 COPY . /app

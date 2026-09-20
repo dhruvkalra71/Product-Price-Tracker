@@ -3,6 +3,7 @@ services:
     name: ine-product-price-tracker-backend
     runtime: docker
     dockerfilePath: ./Dockerfile
+    dockerContext: .
     envVars:
       - key: DJANGO_DEBUG
         value: "False"
@@ -13,4 +14,4 @@ services:
       - key: SCRAPE_SHARED_SECRET
         sync: false
       - key: PLAYWRIGHT_BROWSERS_PATH
-        value: "0"
+        value: "/ms-playwright"
