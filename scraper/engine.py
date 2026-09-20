@@ -9,11 +9,6 @@ import unicodedata
 from dataclasses import asdict, dataclass
 from typing import List, Optional
 
-import httpx
-
-from scraper import engine_lite
-from scraper.catalog import get_product_from_catalog
-
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -35,7 +30,6 @@ class ScrapeResult:
     logs: List[str]
     elapsed_seconds: float
     overlay_detected: bool = False
-    method: str = "browser"  # "lite" (httpx/wasmtime, no browser) or "browser" (Playwright)
 
 def clean_price_string(raw: str) -> Optional[float]:
     if not raw:
@@ -283,99 +277,6 @@ async def _scrape_with_page(
         overlay_detected=overlay_detected
     )
 
-def _lite_scrape_sync(source_product_id: str, max_retries: int) -> ScrapeResult:
-    """
-    Browser-less price fetch: hashcash + WASM mixer + XOR decrypt via
-    plain HTTP (see engine_lite.py). Retries with the same backoff
-    shape as the browser path. On exhaustion, returns a "failed"
-    ScrapeResult so the caller can decide to fall back to Playwright.
-    """
-    t_start = time.time()
-    logs: List[str] = []
-
-    def log(msg: str):
-        ts = time.strftime("%H:%M:%S")
-        entry = f"[{ts}] [Product {source_product_id}] [LITE] {msg}"
-        logs.append(entry)
-        print(entry, flush=True)
-
-    log(f"Attempting browser-less fetch for product_id={source_product_id}")
-    last_error: Optional[str] = None
-
-    with httpx.Client(timeout=15.0) as client:
-        for attempt in range(1, max_retries + 1):
-            log(f"--- Lite attempt {attempt} of {max_retries} ---")
-            result = engine_lite.fetch_price(source_product_id, client=client)
-
-            if result.status == "success":
-                payload = result.payload or {}
-                product_info = get_product_from_catalog(source_product_id) or {}
-                product_name = product_info.get("name", "")
-                stock_qty = payload.get("s")
-                in_stock = bool(stock_qty) and stock_qty > 0
-                stock_raw = f"{stock_qty} left" if stock_qty else "Out of stock"
-
-                log(f"Lite fetch succeeded: price={result.price}")
-                return ScrapeResult(
-                    source_product_id=str(source_product_id),
-                    product_name=product_name,
-                    price=result.price,
-                    currency=payload.get("c", "INR"),
-                    in_stock=in_stock,
-                    stock_raw=stock_raw,
-                    attempts=attempt,
-                    status="success" if attempt == 1 else "retried_then_success",
-                    error_message=None,
-                    logs=logs,
-                    elapsed_seconds=round(time.time() - t_start, 2),
-                    method="lite",
-                )
-
-            last_error = result.error_message
-            log(f"Lite attempt {attempt} failed (status={result.status_code}): {last_error}")
-
-            if attempt < max_retries:
-                if result.status_code in (429, 503):
-                    # Rate limit or intentional chaos injection — this is
-                    # not evidence the lite approach is broken, just that
-                    # we're going too fast. Back off patiently rather than
-                    # burning through retries and dumping to Playwright.
-                    backoff = random.uniform(2.0, 4.0) * attempt
-                    backoff = min(backoff, 15.0)
-                    log(f"Transient ({result.status_code}) — backing off {backoff:.2f}s before retry...")
-                elif result.status_code == 401:
-                    # Genuine telemetry/PoW rejection. Short retry in case
-                    # of a one-off timing fluke; if this persists across
-                    # attempts, the site's validation likely changed and
-                    # falling back to the browser is the right call.
-                    backoff = random.uniform(0.5, 1.5)
-                    log(f"Rejected (401) — short retry in {backoff:.2f}s...")
-                else:
-                    # Unknown/network error — original conservative backoff.
-                    backoff = random.uniform(0, min(6, 1.5 * (2 ** (attempt - 1))))
-                    log(f"Backing off {backoff:.2f}s before retry...")
-                time.sleep(backoff)
-
-    log("All lite attempts exhausted, will fall back to browser path if permitted.")
-    return ScrapeResult(
-        source_product_id=str(source_product_id),
-        product_name="",
-        price=None,
-        currency=None,
-        in_stock=None,
-        stock_raw=None,
-        attempts=max_retries,
-        status="failed",
-        error_message=last_error or "Lite retries exhausted",
-        logs=logs,
-        elapsed_seconds=round(time.time() - t_start, 2),
-        method="lite",
-    )
-
-async def _lite_scrape(source_product_id: str, max_retries: int) -> ScrapeResult:
-    # httpx + wasmtime are blocking; keep the event loop free for concurrent products
-    return await asyncio.to_thread(_lite_scrape_sync, source_product_id, max_retries)
-
 async def scrape_product_async(
     source_product_id: str,
     headed: bool = False,
@@ -392,69 +293,6 @@ async def scrape_product_async(
     return results[str(source_product_id)]
 
 async def scrape_products_batch(
-    source_product_ids: List[str],
-    concurrency: int = 4,
-    max_retries: int = 3,
-    base_url: str = "https://demo.inelabteamdev.com",
-    headless: bool = True,
-    lite_concurrency: int = 2
-) -> dict:
-    """
-    Public entrypoint. Tries the browser-less lite path first for every
-    product; anything that fails falls back to the Playwright browser
-    path (unchanged behavior). Passing headless=False (i.e. --headed on
-    the CLI) skips the lite path entirely, since headed mode is a
-    debugging aid meant to visually confirm what the real browser does.
-
-    lite_concurrency is deliberately capped and staggered below the
-    general `concurrency` value: the site's API rate limiter trips at
-    roughly 7 rapid, unspaced requests, and each lite fetch makes 3
-    calls (challenge/session/price) — so a handful of parallel lite
-    workers is usually enough to saturate it. This has nothing to do
-    with the browser fallback's own concurrency, which still uses
-    `concurrency` as before.
-    """
-    ids = [str(pid) for pid in source_product_ids]
-    if not ids:
-        return {}
-
-    if not headless:
-        return await _scrape_products_batch_browser(
-            ids, concurrency=concurrency, max_retries=max_retries,
-            base_url=base_url, headless=headless
-        )
-
-    print(f"[BATCH] Trying browser-less path for {len(ids)} product(s)...", flush=True)
-    sem = asyncio.Semaphore(max(1, lite_concurrency))
-
-    async def bounded_lite(pid, idx):
-        # Stagger task starts so we don't fire lite_concurrency requests
-        # in the same instant even once the semaphore admits them.
-        await asyncio.sleep((idx % lite_concurrency) * 0.35)
-        async with sem:
-            return pid, await _lite_scrape(pid, max_retries)
-
-    lite_results = dict(
-        await asyncio.gather(*(bounded_lite(pid, i) for i, pid in enumerate(ids)))
-    )
-    succeeded = {pid: r for pid, r in lite_results.items() if r.status != "failed"}
-    failed_ids = [pid for pid in ids if pid not in succeeded]
-
-    browser_results = {}
-    if failed_ids:
-        print(
-            f"[BATCH] {len(failed_ids)}/{len(ids)} product(s) failed the lite path, "
-            f"falling back to browser: {failed_ids}",
-            flush=True
-        )
-        browser_results = await _scrape_products_batch_browser(
-            failed_ids, concurrency=concurrency, max_retries=max_retries,
-            base_url=base_url, headless=headless
-        )
-
-    return {pid: succeeded.get(pid) or browser_results.get(pid) for pid in ids}
-
-async def _scrape_products_batch_browser(
     source_product_ids: List[str],
     concurrency: int = 4,
     max_retries: int = 3,
