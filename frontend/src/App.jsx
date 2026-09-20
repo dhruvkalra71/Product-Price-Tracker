@@ -162,18 +162,14 @@ export default function App() {
     loadTrackedProducts();
   }, []);
 
-  const isStaleScrape = (p) => {
-    if (p.latest_price !== null) return false;
-    if (!p.last_scraped_at && p.first_seen_at) {
-      const ageMs = Date.now() - new Date(p.first_seen_at).getTime();
-      return ageMs > 3 * 60 * 1000; // 3 minutes
-    }
-    return false;
-  };
-
-  // Adaptive auto-polling: 1.5s when any product is pending initial scrape; 8s when all are idle
+  // Adaptive auto-polling: 1.5s when any product is pending or queued; 8s when all are idle
   const hasPendingScrapes = trackedProducts.some(
-    (p) => p.latest_price === null && p.latest_status !== 'failed' && !isStaleScrape(p)
+    (p) =>
+      p.latest_price === null &&
+      (p.scrape_queue_status === 'queued' ||
+        p.scrape_queue_status === 'running' ||
+        p.latest_status === 'pending' ||
+        p.latest_status === 'running')
   );
 
   useEffect(() => {
@@ -477,11 +473,16 @@ export default function App() {
                       <div style={{ marginTop: '0.45rem' }}>
                         {p.latest_price != null ? (
                           renderStockBadge(p.latest_stock_raw, p.latest_in_stock)
-                        ) : (p.latest_status === 'failed' || isStaleScrape(p)) ? (
+                        ) : p.scrape_queue_status === 'queued' ? (
+                          <span style={{ fontSize: '0.8rem', color: '#6366f1', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span className="spinner-border spinner-border-sm" style={{ width: '12px', height: '12px', borderWidth: '2px' }} />
+                            ⏳ Queued (Position #{p.queue_position || 1})...
+                          </span>
+                        ) : (p.latest_status === 'failed' && p.scrape_queue_status !== 'running') ? (
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                               <span style={{ fontSize: '0.78rem', color: '#ef4444', fontWeight: 600 }}>
-                                ⚠️ {isStaleScrape(p) && p.latest_status !== 'failed' ? 'Scrape timed out' : 'Initial scrape failed'}
+                                ⚠️ Initial scrape failed
                               </span>
                               <button
                                 className="btn btn-outline-primary btn-sm"

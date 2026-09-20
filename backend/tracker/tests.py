@@ -15,6 +15,10 @@ class TrackerAPITests(TestCase):
         from django.conf import settings
         settings.SCRAPE_SHARED_SECRET = "ine-tracker-cron-secret-2026"
 
+    def tearDown(self):
+        from tracker.views import scrape_lock
+        scrape_lock.release()
+
     def test_ping_endpoint(self):
         resp = self.client.get(reverse("ping"))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -499,3 +503,100 @@ class TrackerAPITests(TestCase):
             # When secret is unset in settings, any cron call must fail closed with 401
             resp = self.client.post(reverse("scrape-run"), HTTP_X_SCRAPE_SECRET="any-secret")
             self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @patch("tracker.views.scrape_product")
+    def test_concurrent_products_queued_and_processed_fifo(self, mock_scrape):
+        from .models import ScrapeJob
+        from tracker.views import _run_queue_worker
+
+        mock_scrape.side_effect = lambda source_product_id, headed=False: ScrapeResult(
+            source_product_id=source_product_id,
+            product_name=f"Product {source_product_id}",
+            price=1000.0 + int(source_product_id),
+            currency="INR",
+            in_stock=True,
+            stock_raw="In stock",
+            attempts=1,
+            status="success",
+            error_message=None,
+            logs=["ok"],
+            elapsed_seconds=1.0
+        )
+
+        for i in range(1, 6):
+            resp = self.client.post(
+                reverse("product-track"),
+                {
+                    "source_product_id": str(100 + i),
+                    "name": f"Product {i}",
+                    "scrape_now": True,
+                    "sync": False
+                },
+                format="json"
+            )
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        products = list(Product.objects.filter(source_product_id__in=[str(100 + i) for i in range(1, 6)]).order_by("source_product_id"))
+        self.assertEqual(len(products), 5)
+
+        # All 5 must have a ScrapeJob with status="queued"
+        self.assertEqual(ScrapeJob.objects.filter(status="queued").count(), 5)
+
+        # Process the queue via worker
+        _run_queue_worker()
+
+        # All 5 jobs must be done, and all 5 products must have price history
+        self.assertEqual(ScrapeJob.objects.filter(status="done").count(), 5)
+        for p in products:
+            p.refresh_from_db()
+            self.assertEqual(p.price_history.count(), 1)
+            self.assertEqual(p.logs.first().status, "success")
+
+    def test_queued_status_and_position_returned_in_serializer(self):
+        from .models import ScrapeJob
+        from tracker.serializers import ProductSerializer
+
+        p1 = Product.objects.create(source_product_id="301", name="Product 301", is_tracked=True)
+        p2 = Product.objects.create(source_product_id="302", name="Product 302", is_tracked=True)
+
+        j1 = ScrapeJob.objects.create(product=p1, status="queued")
+        j2 = ScrapeJob.objects.create(product=p2, status="queued")
+
+        data1 = ProductSerializer(p1).data
+        data2 = ProductSerializer(p2).data
+
+        self.assertEqual(data1["scrape_queue_status"], "queued")
+        self.assertEqual(data1["queue_position"], 1)
+        self.assertEqual(data1["latest_status"], "queued")
+
+        self.assertEqual(data2["scrape_queue_status"], "queued")
+        self.assertEqual(data2["queue_position"], 2)
+        self.assertEqual(data2["latest_status"], "queued")
+
+    @patch("tracker.views.scrape_products_batch")
+    def test_scrape_max_concurrent_respected_for_initial_scrapes(self, mock_batch):
+        from django.test import override_settings
+        from .models import ScrapeJob
+        from tracker.views import _run_queue_worker
+
+        mock_batch.return_value = {
+            "401": ScrapeResult("401", "P 401", 100.0, "INR", True, "In stock", 1, "success", None, [], 1.0),
+            "402": ScrapeResult("402", "P 402", 200.0, "INR", True, "In stock", 1, "success", None, [], 1.0),
+        }
+
+        p1 = Product.objects.create(source_product_id="401", name="P 401", is_tracked=True)
+        p2 = Product.objects.create(source_product_id="402", name="P 402", is_tracked=True)
+
+        ScrapeJob.objects.create(product=p1, status="queued")
+        ScrapeJob.objects.create(product=p2, status="queued")
+
+        with override_settings(SCRAPE_MAX_CONCURRENT=2):
+            _run_queue_worker()
+
+        mock_batch.assert_called_once()
+        args, kwargs = mock_batch.call_args
+        self.assertEqual(kwargs.get("concurrency"), 2)
+        self.assertEqual(set(args[0]), {"401", "402"})
+
+        self.assertEqual(ScrapeJob.objects.filter(status="done").count(), 2)
+

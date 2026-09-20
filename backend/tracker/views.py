@@ -17,7 +17,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Product, PriceHistory, ScrapeLog, Alert
+from .models import Product, PriceHistory, ScrapeLog, Alert, ScrapeJob
 from .serializers import (
     ProductSerializer,
     ProductDetailSerializer,
@@ -154,18 +154,18 @@ class TrackProductView(APIView):
                 product.thumbnail_url = thumbnail_url
             product.save()
 
-        # Trigger immediate initial scrape if requested (async in background unless testing/sync)
+        # Trigger immediate initial scrape if requested (queued in FIFO ScrapeJob queue)
         if immediate_scrape and not product.price_history.exists():
-            is_test = getattr(settings, "TESTING", False) or "test" in sys.argv or request.data.get("sync", False)
+            job = enqueue_scrape_job(product, job_type="initial")
+            is_test = getattr(settings, "TESTING", False) or "test" in sys.argv
             if is_test:
-                _execute_product_scrape(product)
+                sync_val = request.data.get("sync", True)
+                if isinstance(sync_val, str):
+                    sync_val = sync_val.lower() not in ("false", "0")
+                if sync_val:
+                    _process_single_job(job)
             else:
-                thread = threading.Thread(
-                    target=_async_initial_scrape,
-                    args=(product.id,),
-                    daemon=True
-                )
-                thread.start()
+                _trigger_queue_worker()
 
         return Response(ProductSerializer(product).data, status=status.HTTP_201_CREATED)
 
@@ -179,6 +179,7 @@ class UntrackProductView(APIView):
             product.price_history.all().delete()
             product.logs.all().delete()
             product.alerts.all().delete()
+            product.scrape_jobs.all().delete()
         return Response({"status": "untracked", "id": pk})
 
 class ProductDetailView(APIView):
@@ -394,85 +395,187 @@ def _execute_product_scrape(product: Product) -> dict:
     scrape_res = scrape_product(source_product_id=product.source_product_id, headed=False)
     return _finalize_scrape(product, scrape_res)
 
-def _async_initial_scrape(product_id: int, max_attempts: int = 60, retry_delay: float = 2.0):
+_worker_thread = None
+_worker_lock = threading.Lock()
+
+def enqueue_scrape_job(product: Product, job_type: str = "initial") -> ScrapeJob:
     """
-    Asynchronously executes initial scrape for a newly tracked product in a background thread.
-    Coordinates with the cross-process scrape_lock, queueing and waiting for previous
-    scrapes to complete before executing sequentially.
-    Cleans up DB connections before, during, and after execution to prevent connection leaks.
+    Enqueues a scrape job in the persistent DB-backed FIFO queue.
+    If a job is already queued or running for this product, reuses it.
+    """
+    with transaction.atomic():
+        existing = ScrapeJob.objects.filter(product=product, status__in=["queued", "running"]).first()
+        if existing:
+            return existing
+        return ScrapeJob.objects.create(
+            product=product,
+            job_type=job_type,
+            status="queued"
+        )
+
+def _trigger_queue_worker():
+    """
+    Ensures a single background worker thread is running to process queued ScrapeJobs FIFO.
+    """
+    global _worker_thread
+    with _worker_lock:
+        if _worker_thread is None or not _worker_thread.is_alive():
+            _worker_thread = threading.Thread(target=_run_queue_worker, daemon=True)
+            _worker_thread.start()
+
+def _run_queue_worker():
+    """
+    FIFO queue worker loop.
+    Pulls queued jobs up to SCRAPE_MAX_CONCURRENT, runs them sequentially (or concurrently if configured),
+    and terminates when the queue is drained.
     """
     import time
     from django.db import close_old_connections
     close_old_connections()
-    product = None
-    lock_acquired = False
-    for attempt in range(1, max_attempts + 1):
-        if scrape_lock.acquire(blocking=False):
-            lock_acquired = True
-            break
-        if attempt < max_attempts:
-            if attempt % 5 == 1:
-                logger.info(
-                    "Scrape lock busy; initial scrape for product %s waiting in queue (attempt %d/%d)",
-                    product_id, attempt, max_attempts
-                )
-            time.sleep(retry_delay)
-            close_old_connections()
 
-    if not lock_acquired:
-        logger.warning(
-            "Could not acquire scrape lock for initial scrape of product %s after %d attempts",
-            product_id, max_attempts
-        )
-        try:
-            product = Product.objects.get(id=product_id)
+    # Reset any stale running jobs (e.g. from prior process crash or restart > 5 mins ago)
+    stale_cutoff = timezone.now() - timedelta(minutes=5)
+    ScrapeJob.objects.filter(status="running", started_at__lt=stale_cutoff).update(
+        status="failed",
+        error_message="Scrape job timed out or worker process restarted",
+        finished_at=timezone.now()
+    )
+
+    while True:
+        close_old_connections()
+        max_concurrent = max(1, int(getattr(settings, "SCRAPE_MAX_CONCURRENT", 1)))
+        claimed_jobs = []
+
+        with transaction.atomic():
+            qs = ScrapeJob.objects.filter(status="queued").order_by("created_at")
+            if connection.vendor == "postgresql":
+                qs = qs.select_for_update(skip_locked=True)
+
+            batch = list(qs[:max_concurrent])
+            if not batch:
+                break  # Queue is completely drained!
+
             now = timezone.now()
+            for job in batch:
+                job.status = "running"
+                job.started_at = now
+                job.save(update_fields=["status", "started_at"])
+                claimed_jobs.append(job)
+
+        if max_concurrent > 1 and len(claimed_jobs) > 1:
+            _process_jobs_batch(claimed_jobs, concurrency=max_concurrent)
+        else:
+            for job in claimed_jobs:
+                _process_single_job(job)
+
+    close_old_connections()
+
+def _process_single_job(job: ScrapeJob):
+    import time
+    from django.db import close_old_connections
+    product = job.product
+    if not product.is_tracked:
+        job.status = "done"
+        job.finished_at = timezone.now()
+        job.error_message = "Product was untracked before scrape"
+        job.save(update_fields=["status", "finished_at", "error_message"])
+        return
+
+    # Acquire cross-process scrape_lock so only 1 browser launches across all gunicorn workers
+    while not scrape_lock.acquire(blocking=False):
+        time.sleep(0.5)
+        close_old_connections()
+
+    try:
+        res = _execute_product_scrape(product)
+        job.status = "done" if res.get("status") in ["success", "retried_then_success"] else "failed"
+        job.error_message = res.get("error_message")
+    except Exception as e:
+        logger.exception("Initial scrape job failed for product %s: %s", product.id, e)
+        job.status = "failed"
+        job.error_message = str(e)
+        now = timezone.now()
+        try:
             with transaction.atomic():
                 ScrapeLog.objects.create(
                     product=product,
                     started_at=now,
                     finished_at=now,
                     status="failed",
-                    attempt_count=max_attempts,
-                    error_message="Scrape lock busy; retry shortly",
-                    http_or_dom_detail={"error": "Lock acquisition failed", "context": "_async_initial_scrape"}
+                    attempt_count=1,
+                    error_message=str(e),
+                    http_or_dom_detail={"error": str(e), "context": "_process_single_job crash"}
                 )
-                product.last_scraped_at = None
-                product.save()
-        except Exception as e:
-            logger.exception("Failed to record lock failure for product %s: %s", product_id, e)
-        finally:
-            close_old_connections()
+                product.last_scraped_at = now if product.price_history.exists() else None
+                product.save(update_fields=["last_scraped_at"])
+        except Exception as log_err:
+            logger.exception("Failed to record error ScrapeLog for product %s: %s", product.id, log_err)
+    finally:
+        job.finished_at = timezone.now()
+        job.save(update_fields=["status", "finished_at", "error_message"])
+        scrape_lock.release()
+        close_old_connections()
+
+def _process_jobs_batch(jobs: list[ScrapeJob], concurrency: int):
+    import time
+    from django.db import close_old_connections
+    valid_jobs = [j for j in jobs if j.product.is_tracked]
+    if not valid_jobs:
+        now = timezone.now()
+        for j in jobs:
+            j.status = "done"
+            j.finished_at = now
+            j.save(update_fields=["status", "finished_at"])
         return
 
+    while not scrape_lock.acquire(blocking=False):
+        time.sleep(0.5)
+        close_old_connections()
+
     try:
-        product = Product.objects.get(id=product_id)
-        if not product.is_tracked:
-            logger.info("Product %s was untracked while waiting in queue; skipping scrape.", product_id)
-            return
-        _execute_product_scrape(product)
+        source_ids = [str(j.product.source_product_id) for j in valid_jobs]
+        results_by_id = asyncio.run(
+            scrape_products_batch(source_ids, concurrency=concurrency)
+        )
+        now = timezone.now()
+        for job in valid_jobs:
+            scrape_res = results_by_id.get(str(job.product.source_product_id))
+            if scrape_res:
+                _finalize_scrape(job.product, scrape_res)
+                job.status = "done" if scrape_res.status in ["success", "retried_then_success"] else "failed"
+                job.error_message = scrape_res.error_message
+            else:
+                job.status = "failed"
+                job.error_message = "No result returned from batch scrape"
+            job.finished_at = now
+            job.save(update_fields=["status", "finished_at", "error_message"])
     except Exception as e:
-        logger.exception("Initial background scrape failed for product %s: %s", product_id, e)
-        if product is not None:
-            try:
-                now = timezone.now()
-                with transaction.atomic():
-                    ScrapeLog.objects.create(
-                        product=product,
-                        started_at=now,
-                        finished_at=now,
-                        status="failed",
-                        attempt_count=1,
-                        error_message=str(e),
-                        http_or_dom_detail={"error": str(e), "context": "_async_initial_scrape crash"}
-                    )
-                    product.last_scraped_at = now if product.price_history.exists() else None
-                    product.save()
-            except Exception as log_err:
-                logger.exception("Failed to record error ScrapeLog for product %s: %s", product_id, log_err)
+        logger.exception("Batch scrape failed: %s", e)
+        now = timezone.now()
+        for job in valid_jobs:
+            job.status = "failed"
+            job.error_message = str(e)
+            job.finished_at = now
+            job.save(update_fields=["status", "finished_at", "error_message"])
     finally:
         scrape_lock.release()
         close_old_connections()
+
+def _async_initial_scrape(product_id: int):
+    """
+    Backward-compatibility helper: enqueues the product into the ScrapeJob FIFO queue
+    and triggers the queue worker (or processes synchronously during tests).
+    """
+    try:
+        product = Product.objects.get(id=product_id)
+        job = enqueue_scrape_job(product, job_type="initial")
+        is_test = getattr(settings, "TESTING", False) or "test" in sys.argv
+        if is_test:
+            _process_single_job(job)
+        else:
+            _trigger_queue_worker()
+    except Exception as e:
+        logger.exception("Failed to enqueue initial scrape for product %s: %s", product_id, e)
 
 def _check_alerts(product: Product, current_price: Decimal, in_stock: bool, previous_in_stock: Optional[bool] = None):
     for alert in product.alerts.filter(notified=False):

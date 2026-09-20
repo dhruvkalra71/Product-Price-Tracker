@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Product, PriceHistory, ScrapeLog, Alert
+from .models import Product, PriceHistory, ScrapeLog, Alert, ScrapeJob
 
 class PriceHistorySerializer(serializers.ModelSerializer):
     class Meta:
@@ -25,6 +25,8 @@ class ProductSerializer(serializers.ModelSerializer):
     latest_stock_raw = serializers.SerializerMethodField()
     latest_status = serializers.SerializerMethodField()
     latest_error = serializers.SerializerMethodField()
+    scrape_queue_status = serializers.SerializerMethodField()
+    queue_position = serializers.SerializerMethodField()
     alerts = AlertSerializer(many=True, read_only=True)
 
     class Meta:
@@ -35,7 +37,13 @@ class ProductSerializer(serializers.ModelSerializer):
             "scrape_interval_minutes", "last_scraped_at",
             "latest_price", "latest_in_stock", "latest_stock_raw", "latest_status",
             "latest_error", "alerts",
+            "scrape_queue_status", "queue_position",
         ]
+
+    def _get_active_job(self, obj):
+        if not hasattr(obj, "_cached_active_job"):
+            obj._cached_active_job = obj.scrape_jobs.filter(status__in=["queued", "running"]).order_by("created_at").first()
+        return obj._cached_active_job
 
     def get_latest_price(self, obj):
         e = obj.latest_price_entry
@@ -47,10 +55,26 @@ class ProductSerializer(serializers.ModelSerializer):
     def get_latest_stock_raw(self, obj):
         return (e := obj.latest_price_entry) and e.stock_raw
 
+    def get_scrape_queue_status(self, obj):
+        job = self._get_active_job(obj)
+        return job.status if job else None
+
+    def get_queue_position(self, obj):
+        job = self._get_active_job(obj)
+        if not job or job.status != "queued":
+            return None
+        return ScrapeJob.objects.filter(status="queued", created_at__lte=job.created_at).count()
+
     def get_latest_status(self, obj):
+        job = self._get_active_job(obj)
+        if job and not obj.latest_price_entry:
+            return job.status
         return (l := obj.logs.first()) and l.status or "pending"
 
     def get_latest_error(self, obj):
+        job = self._get_active_job(obj)
+        if job and job.status in ["queued", "running"] and not obj.latest_price_entry:
+            return None
         return (l := obj.logs.first()) and l.error_message or None
 
 class ProductDetailSerializer(ProductSerializer):

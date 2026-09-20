@@ -86,3 +86,27 @@ class CatalogCache(models.Model):
 
     def __str__(self):
         return f"CatalogCache({self.key}, items={len(self.data)}, updated_at={self.updated_at})"
+
+class ScrapeJob(models.Model):
+    STATUS_CHOICES = [
+        ("queued", "Queued"),
+        ("running", "Running"),
+        ("done", "Done"),
+        ("failed", "Failed"),
+    ]
+
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="scrape_jobs")
+    job_type = models.CharField(max_length=32, default="initial")
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default="queued", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        db_table = "tracker_scrapejob"
+
+    def __str__(self):
+        return f"ScrapeJob #{self.id} for Product {self.product_id}: {self.status}"
+
