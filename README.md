@@ -1,23 +1,49 @@
 # INE Product Price Tracker
 
-An automated price tracker built specifically to monitor the chaos mock storefront (`https://demo.inelabteamdev.com/`).
+An automated, resilient product price tracker built specifically to monitor the chaos mock storefront (`https://demo.inelabteamdev.com/`).
 
-The mock store deliberately employs anti-scraping countermeasures:
-1. Client-rendered single-page app (empty `<div id="root">`).
-2. Gated price reveal requiring human mouse-dwell telemetry (`minMoves: 8`, `minDwellMs: 600`).
-3. Chaos click dropper (`Xn` drops 17.5% of clicks and delays 17.5% by 900ms).
-4. WebAssembly proof-of-work challenge and encrypted quote payload.
-5. DOM honeypots (hidden decoy price spans, line-through retail MRPs, promotional badges).
+The mock store deliberately employs anti-scraping countermeasures and simulated network instability:
+1. **Client-Rendered Single-Page App**: Empty `<div id="root">` rendered by React in the browser.
+2. **Gated Price Reveal**: Requires human mouse-dwell telemetry (`minMoves: 8`, `minDwellMs: 600`) over `.price-block`.
+3. **Chaos Click Dropper (`Xn`)**: Drops 17.5% of clicks completely and delays 17.5% of clicks by 900ms.
+4. **Intermittent Server 503s & In-Page Retries**: `/api/products/{id}/price` intermittently returns HTTP 503, triggering up to 6 internal retries with backoff in the storefront's in-page script.
+5. **WebAssembly Proof-of-Work Challenge**: Evaluates a SHA-256 hashcash challenge before granting quote decryption keys.
+6. **DOM Honeypots & Decoys**: Fake hidden price spans (`display: none`), line-through retail MRPs, and promotional badges.
 
 ---
 
-## Architecture & Judgment
+## Architecture & Engineering Highlights
 
-- **Lightweight Catalog Search (`/scraper/catalog.py`):** Products are discovered and searched via the store's public JSON API (`/api/catalog?page=N&pageSize=20`) with in-memory caching. A headless browser is not wasted on listing pages.
-- **Headless Browser Detail Scraper (`/scraper/engine.py`):** Playwright is strictly used where genuinely required: executing the hover-dwell telemetry, surviving the click dropper, letting the browser solve the WASM/PoW challenge, and parsing the genuine revealed price from the DOM while filtering out hidden decoys.
-- **Backend (`/backend`):** Django + Django REST Framework with Supabase Postgres (via `DATABASE_URL`) and local SQLite fallback.
+```
+                       ┌──────────────────────────────┐
+                       │   React + Vite Frontend UI   │
+                       │ (Live Search, Charts, Logs)  │
+                       └──────────────┬───────────────┘
+                                      │ REST API / Adaptive Polling
+                                      ▼
+                       ┌──────────────────────────────┐
+                       │    Django REST API Backend   │
+                       └──────────────┬───────────────┘
+                                      │
+              ┌───────────────────────┴───────────────────────┐
+              ▼                                               ▼
+┌───────────────────────────┐                   ┌───────────────────────────┐
+│   PostgreSQL / SQLite     │                   │  Playwright Engine Worker │
+│  - Products & PriceHistory│                   │  - Telemetry generation   │
+│  - Audit ScrapeLogs       │                   │  - Chaos click recovery   │
+│  - FIFO ScrapeJob Queue   │◄──────────────────┤  - WASM / Decoy filters   │
+│  - Postgres Advisory Lock │                   │  - 35s in-page 503 buffer │
+└───────────────────────────┘                   └───────────────────────────┘
+```
+
+- **Database-Backed Sequential FIFO Queue (`ScrapeJob`):** When multiple products are tracked in batch, requests do not contend or fail with arbitrary timeouts. Initial scrapes are enqueued in a persistent database queue (`status="queued"`), processed in strict FIFO order, and surfaced in the frontend with live queue positions (`⏳ Queued (Position #N)...`).
+- **Cross-Process Concurrency Locking (`ScrapeLock`):** Serializes Playwright browser launches across all Gunicorn worker processes via PostgreSQL session advisory locks (`pg_try_advisory_lock` / `pg_advisory_unlock`), preventing memory exhaustion on resource-constrained containers.
+- **Configurable Concurrency (`SCRAPE_MAX_CONCURRENT`):** Defaults to `1` for 512MB hosts. When scaled up, batch processing seamlessly utilizes `scrape_products_batch` with shared browser contexts.
+- **Orphaned Product Auto-Healing:** Products tracked prior to worker deployments or during container restarts are automatically detected by `/api/products` and auto-enqueued for initial price resolution.
+- **Lightweight Catalog Search (`/scraper/catalog.py`):** Products are searched via the store's public JSON API (`/api/catalog?page=N&pageSize=20`) with in-memory caching—a headless browser is never wasted on listing pages.
+- **Headless Browser Detail Scraper (`/scraper/engine.py`):** Playwright is strictly used where genuinely required: simulating cursor dwell, surviving click drops/delays, waiting for store 503 in-page retries, and extracting verified prices while ignoring decoys.
 - **External Cron Trigger (`POST /api/scrape/run`):** Authenticated with `X-Scrape-Secret` to accommodate free-tier sleeping backends (Render) without relying on fragile in-process loops.
-- **Frontend (`/frontend`):** React + Vite dashboard featuring live catalog search, interactive price history charts (Recharts), toggleable data tables, and honest scrape audit logs.
+- **Honest Logging Guarantee:** Every scrape attempt creates a detailed `ScrapeLog` row. `PriceHistory` is **only written when a verified price is parsed**—failed scrapes never write corrupt or empty data.
 
 ---
 
@@ -39,11 +65,8 @@ pip install -r requirements.txt
 # Install Playwright browser dependencies
 python -m playwright install chromium
 
-# Run migrations (defaults to local SQLite db.sqlite3 if DATABASE_URL is not set)
+# Run migrations (defaults to local SQLite db.sqlite3 if DATABASE_URL is unset)
 python manage.py migrate
-
-# (Optional) Run test suite
-python manage.py test tracker
 
 # Start development server
 python manage.py runserver 8000
@@ -63,84 +86,104 @@ npm run dev
 ```
 Frontend UI will be live at `http://localhost:3000/`.
 
-### 3. CLI Scraper Standalone Run
-You can run the scraper directly in headed mode to inspect the browser interaction and telemetry generation:
+### 3. Running Unit Tests
 ```bash
-# Headed run on product 1
+# Run backend API and queue tests (25 tests)
+cd backend
+python manage.py test tracker
+
+# Run Playwright scraper integration tests (6 tests)
+cd ..
+python -m unittest scraper/test_engine_playwright.py
+
+# Verify frontend production build
+cd frontend
+npm run build
+```
+
+### 4. CLI Scraper Standalone Run
+You can run the Playwright scraper directly from the terminal to inspect telemetry generation and price reveal:
+```bash
+# Headed run on product 1 (launches browser window)
 python -m scraper.engine --product 1 --headed
 
-# Headless run on product 69
-python -m scraper.engine --product 69
+# Headless run on product 708
+python -m scraper.engine --product 708
 ```
 
 ---
 
 ## Scraping Schedule & Cron Configuration
 
-Because free-tier hosting (Render) sleeps after inactivity, the scraping engine is triggered externally rather than using an in-process loop.
+Because free-tier hosting (Render) sleeps after inactivity, the recurring scrape cycle is driven externally:
 
-### How it works:
-1. Every tracked product has a `scrape_interval_minutes` (default: `120` minutes / 2 hours, configurable per product).
-2. An external cron service (e.g. [cron-job.org](https://cron-job.org)) sends a `POST` request to `https://<backend-url>/api/scrape/run`.
-3. The request must include the header:
-   ```http
-   X-Scrape-Secret: <SCRAPE_SHARED_SECRET>
-   ```
-4. **Asynchronous Execution:** The endpoint validates auth, checks an in-process lock (`threading.Lock`), queries due products, launches scraping in a background thread, and returns `202 Accepted` immediately (`due_count`) without waiting for browser execution.
-5. **Overlap Protection:** If a scrape run is already in progress when another cron call fires, the endpoint returns `409 Conflict` (`already_running`) instead of launching duplicate browser sessions.
-6. **Concurrency Cap:** Controlled by `SCRAPE_MAX_CONCURRENT` (default: `1`, sequential processing where one product's browser session fully closes before the next begins) to protect against memory exhaustion on 512MB free-tier instances.
-7. Recommended schedule on cron-job.org: **Every 15 minutes** (or every 2 hours).
+### 1. Recurring Price Scrapes (`POST /api/scrape/run`)
+- **Schedule:** Trigger every **15 minutes** (or up to every 2 hours) via [cron-job.org](https://cron-job.org) or GitHub Actions.
+- **Method & URL:** `POST https://<backend-url>/api/scrape/run`
+- **Authentication Header:**
+  ```http
+  X-Scrape-Secret: <SCRAPE_SHARED_SECRET>
+  ```
+- **How it works:**
+  1. The endpoint validates the secret key.
+  2. Queries all tracked products where `last_scraped_at` is older than their configured `scrape_interval_minutes` (default: 120m).
+  3. Checks `ScrapeLock`. If another scrape run is in progress, returns `409 Conflict` (`already_running`) to prevent overlapping runs.
+  4. Returns `202 Accepted` immediately with the `due_count`, running the batch in the background.
 
-### Keep-Warm Ping (Crucial for Cold Start Mitigation):
-A trivial, independent keep-warm endpoint is available at `GET /api/ping`. A separate cron job hitting this endpoint **every 10 minutes** keeps the Render instance warm.
-> [!NOTE]
-> Automated scrape reliability depends on the Render instance already being warm when `/api/scrape/run` fires. Configuring this 10-minute ping job is essential to eliminate cold-start wake-up delays.
+### 2. Keep-Warm Ping (`GET /api/ping`)
+- **Schedule:** Trigger every **10 minutes** via a separate job on [cron-job.org](https://cron-job.org).
+- **Method & URL:** `GET https://<backend-url>/api/ping`
+- **Purpose:** Keeps the Render container warm so scheduled scraping requests on `/api/scrape/run` do not experience cold-start spin-up timeouts.
 
 ---
 
 ## Environment Variables
 
-### Backend (`backend/.env` / Render environment)
+### Backend (`backend/.env` or Render Dashboard)
 
 | Variable | Required | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `DJANGO_SECRET_KEY` | Yes (Prod) | `insecure-dev-key...` | Cryptographic signing secret for Django. |
-| `DJANGO_DEBUG` | No | `True` | Set to `False` in production. |
-| `DATABASE_URL` | No | SQLite (`db.sqlite3`) | Supabase Session Pooler URI on port 5432 (e.g. `postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres`). Direct `db.<ref>.supabase.co` is IPv6-only and will fail on Render with "Network is unreachable". |
-| `SCRAPE_SHARED_SECRET`| Yes | `ine-tracker-cron-secret-2026` | Secret header key required to invoke `POST /api/scrape/run`. |
-| `SCRAPE_MAX_CONCURRENT`| No | `1` | Max concurrent Playwright browser sessions (default: `1` sequential for safe 512MB RAM usage). |
-| `CONN_MAX_AGE` | No | `0` | Connection max age (`0` recommended for connection poolers). |
-| `PLAYWRIGHT_BROWSERS_PATH`| Render only | `/ms-playwright` | Forces Playwright to use local container browser path on Render. |
+| `DJANGO_SECRET_KEY` | Yes (Prod) | `insecure-dev-key...` | Django cryptographic signing secret. |
+| `DJANGO_DEBUG` | No | `False` (in prod) | Set to `False` in production. |
+| `DATABASE_URL` | Recommended | SQLite (`db.sqlite3`) | Supabase Session Pooler URI on port 5432 (e.g. `postgresql://postgres.<ref>:<pass>@aws-0-<region>.pooler.supabase.com:5432/postgres`). Direct `db.<ref>.supabase.co` is IPv6-only and will fail on Render with "Network unreachable". |
+| `SCRAPE_SHARED_SECRET` | Yes | `ine-tracker-cron-secret-2026` | Shared secret header required to invoke `POST /api/scrape/run`. |
+| `SCRAPE_MAX_CONCURRENT` | No | `1` | Max concurrent browser sessions (default: `1` sequential for memory stability on 512MB RAM). |
+| `CONN_MAX_AGE` | No | `0` | Connection max age (`0` recommended for transaction/session poolers). |
+| `PLAYWRIGHT_BROWSERS_PATH`| Render only | `/ms-playwright` | Forces Playwright to locate the container's installed browser binaries. |
 
-### Frontend (`frontend/.env` / Vercel environment)
+### Frontend (`frontend/.env` or Vercel Dashboard)
 
 | Variable | Required | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `VITE_API_BASE_URL` | Production | `""` (proxies `/api`) | Full URL of the backend API (e.g. `https://ine-price-tracker.onrender.com`). |
+| `VITE_API_BASE_URL` | Production | `""` (proxies `/api`) | Public backend API URL (e.g. `https://ine-product-price-tracker-backend.onrender.com`). |
 
 ---
 
-## How the Scraper Handles Failure
+## Failure Recovery & Edge Case Handling
 
-The scraper module (`/scraper/engine.py`) enforces strict error handling:
+The tracking engine is hardened against real-world chaos and anti-scraping traps:
 
-1. **Human Telemetry Simulation:** Moves cursor over `.price-block` in 12 steps over $>600\text{ ms}$ to satisfy `minMoves: 8` and `minDwellMs: 600`, preventing the button from staying disabled.
-2. **Chaos Click Recovery:** Detects if `Xn` dropped the click (state remaining in `price-idle` after 1.0s) and automatically re-clicks.
-3. **Decoy Filtering:** Computes live styles on DOM elements. Elements with `display: none` (`.price-value`, `.amount[data-price="true"]`) and `text-decoration: line-through` (retail MRP) are rejected.
-4. **Text Normalization:** Strips zero-width spaces (`\u200b`), non-breaking spaces (`\u00a0`), and converts full-width unicode numerals (`\uff10-\uff19`) to standard ASCII digits.
-5. **Retry with Fresh Reload:** On any network timeout or `.price-error` state, the scraper retries up to 3 times with exponential backoff ($2\text{s}, 4\text{s}, 8\text{s}$) with a clean page reload.
-6. **Honest Logging Guarantee:**
-   - Every scrape attempt creates a `ScrapeLog` row with status (`success`, `retried_then_success`, or `failed`), attempt count, duration, and error message.
-   - `PriceHistory` is **only written when a verified price is parsed**. A failed scrape **never writes corrupt, empty, or placeholder data**.
-
-Detailed technical findings and deobfuscated source excerpts are documented in [`docs/site-notes.md`](docs/site-notes.md).
+1. **Store 503 In-Page Retries:** The storefront API intermittently responds with 503, causing its in-page React component to retry up to 6 times with backoff. Playwright waits up to **35 seconds** (`page.wait_for_selector(".price-success, .price-error", timeout=35000)`) so the store's internal retries succeed without timing out prematurely.
+2. **Chaos Click Recovery:** If `Xn` delays a click by 900ms, the scraper gives it **1100ms** before verifying state. If the click was truly dropped, it re-clicks up to 2 additional times.
+3. **Decoy & MRP Filtering:** Live computed CSS styles are checked. Strikethrough text (`text-decoration: line-through`) and hidden elements (`display: none`) are ignored in favor of the bold 38.4px genuine price.
+4. **Text Normalization:** Cleans unicode quirks including full-width digits (`\uff10-\uff19`), non-breaking spaces (`\u00a0`), and zero-width spaces (`\u200b`).
+5. **Worker Interruption Recovery:** If a server process terminates while a scrape job is marked `status="running"`, the worker resets stale jobs older than 5 minutes to `status="failed"` on restart.
+6. **Adaptive Polling:** The React frontend polls every **1.5s** while any product is `queued` or `running`, and drops to **8s** when all products are idle.
 
 ---
 
-## Repository & Deployment
+## Deployment Guide
 
-- **GitHub Repository:** [https://github.com/dhruvkalra71/Product-Price-Tracker](https://github.com/dhruvkalra71/Product-Price-Tracker)
-- **Frontend (Vercel):** *Deploy from `frontend/` with `VITE_API_BASE_URL` pointing to backend.*
-- **Backend (Render):** *Deploy blueprint using `render.yaml` or Docker/Python runtime with `Procfile`.*
-- **Database (Supabase):** *Set `DATABASE_URL` in backend environment.*
+- **Frontend (Vercel):**
+  - Root directory: `frontend`
+  - Build command: `npm run build`
+  - Output directory: `dist`
+  - Environment variables: `VITE_API_BASE_URL=https://<your-backend>.onrender.com`
+- **Backend (Render):**
+  - Blueprint: uses [`render.yaml`](render.yaml) or Docker runtime with [`Dockerfile`](Dockerfile).
+  - Automatically runs `python backend/manage.py migrate` on container start.
+  - Workers configured: `gunicorn tracker_project.wsgi:application --workers 2 --threads 4`.
+- **Database (Supabase):**
+  - Set `DATABASE_URL` to Supabase connection pooler port 5432 in backend environment.
+
 
