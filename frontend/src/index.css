@@ -184,6 +184,39 @@ body {
   background: var(--danger-bg);
 }
 
+.btn-ghost-danger {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--danger);
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  border-radius: var(--radius);
+  cursor: pointer;
+  opacity: 0.75;
+  transition: all 0.15s ease;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.btn-ghost-danger:hover {
+  opacity: 1;
+  background: var(--danger-bg);
+  border-color: var(--danger);
+}
+
+.btn-outline-primary {
+  background: transparent;
+  border: 1px solid var(--primary);
+  color: var(--primary);
+  font-weight: 600;
+}
+.btn-outline-primary:hover {
+  background: var(--primary);
+  color: white;
+}
+
 .btn-sm {
   padding: 0.25rem 0.65rem;
   font-size: 0.75rem;
@@ -205,25 +238,49 @@ body {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  position: relative;
 }
 .card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.08);
+}
+
+/* Alert prominence on cards */
+.card.has-alert-active {
+  border-left: 4px solid var(--primary) !important;
+}
+
+.card.has-alert-triggered {
+  border-left: 4px solid var(--success) !important;
+  box-shadow: -2px 0 12px rgba(34, 197, 94, 0.2), 0 2px 6px rgba(0,0,0,0.06);
 }
 
 .card-header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.card-footer-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 0.85rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.725rem;
+  color: var(--text-muted);
+  opacity: 0.85;
 }
 
 .badge {
   display: inline-flex;
   align-items: center;
+  gap: 0.3rem;
   padding: 0.2rem 0.6rem;
-  font-size: 0.75rem;
+  font-size: 0.725rem;
   font-weight: 600;
   border-radius: 9999px;
   text-transform: uppercase;
@@ -234,12 +291,56 @@ body {
 .badge-danger { background: var(--danger-bg); color: var(--danger); }
 .badge-neutral { background: var(--hover-bg); color: var(--text-muted); }
 
-/* Price display */
-.price-tag {
-  font-size: 1.75rem;
+/* Status badge system for stock */
+.badge-stock {
+  font-size: 0.725rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 0.2rem 0.55rem;
+  border-radius: 9999px;
+  text-transform: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.badge-stock-in {
+  background: var(--success-bg);
+  color: var(--success);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+.badge-stock-out {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+.badge-stock-urgent {
+  background: rgba(245, 158, 11, 0.15);
+  color: #d97706;
+  border: 1px solid rgba(245, 158, 11, 0.35);
   font-weight: 700;
+}
+[data-theme="dark"] .badge-stock-urgent {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.2);
+}
+
+.badge-tracked {
+  background: var(--success);
+  color: white;
+  font-weight: 600;
+  padding: 0.3rem 0.75rem;
+  text-transform: none;
+  letter-spacing: 0.01em;
+  box-shadow: 0 1px 3px rgba(34, 197, 94, 0.3);
+}
+
+/* Price display - focal point */
+.price-tag {
+  font-size: 2rem;
+  font-weight: 800;
   color: var(--text-main);
-  letter-spacing: -0.02em;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
 }
 
 /* Tables */
@@ -350,26 +451,53 @@ tr.row-failed {
   font-size: 0.8rem;
 }
 
-/* Live pulse indicator */
+/* Live sync indicator */
+.live-sync-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0.35rem 0.85rem;
+  border-radius: 9999px;
+  background: var(--hover-bg);
+  border: 1px solid var(--border);
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
 .pulse-dot {
   display: inline-block;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background-color: var(--success);
-  box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.7);
-  animation: pulse-ring 2s infinite cubic-bezier(0.66, 0, 0, 1);
+  position: relative;
+  flex-shrink: 0;
+}
+
+.pulse-dot::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background-color: var(--success);
+  opacity: 0.5;
+  animation: pulse-ring 2s infinite cubic-bezier(0.4, 0, 0.6, 1);
 }
 
 @keyframes pulse-ring {
   0% {
-    box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.7);
+    transform: scale(0.8);
+    opacity: 0.8;
   }
   70% {
-    box-shadow: 0 0 0 6px rgba(22, 163, 74, 0);
+    transform: scale(2.2);
+    opacity: 0;
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(22, 163, 74, 0);
+    transform: scale(2.2);
+    opacity: 0;
   }
 }
 

@@ -20,8 +20,6 @@ from .models import Product, PriceHistory, ScrapeLog, Alert
 from .serializers import (
     ProductSerializer,
     ProductDetailSerializer,
-    PriceHistorySerializer,
-    ScrapeLogSerializer,
     AlertSerializer,
 )
 from scraper.catalog import search_catalog, get_product_from_catalog
@@ -98,7 +96,7 @@ class TrackProductView(APIView):
 
         # Trigger immediate initial scrape if requested (async in background unless testing/sync)
         if immediate_scrape and not product.price_history.exists():
-            is_test = getattr(settings, "TESTING", False) or any("test" in arg for arg in sys.argv) or "pytest" in sys.modules or request.data.get("sync", False)
+            is_test = getattr(settings, "TESTING", False) or "test" in sys.argv or request.data.get("sync", False)
             if is_test:
                 _execute_product_scrape(product)
             else:
@@ -143,17 +141,6 @@ class ProductDetailView(APIView):
         product.save(update_fields=["scrape_interval_minutes"])
         return Response(ProductDetailSerializer(product).data, status=status.HTTP_200_OK)
 
-class ProductHistoryView(APIView):
-    def get(self, request, pk):
-        product = get_object_or_404(Product, pk=pk)
-        history = product.price_history.all()
-        return Response(PriceHistorySerializer(history, many=True).data)
-
-class ProductLogsView(APIView):
-    def get(self, request, pk):
-        product = get_object_or_404(Product, pk=pk)
-        logs = product.logs.all()[:100]
-        return Response(ScrapeLogSerializer(logs, many=True).data)
 
 class AlertConfigView(APIView):
     def post(self, request, pk):

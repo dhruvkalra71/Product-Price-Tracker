@@ -162,16 +162,9 @@ async def _scrape_with_page(
 
             # 5. Handle chaos click dropper (Xn drops 17.5% of clicks)
             try:
-                await page.wait_for_function(
-                    """() => !document.querySelector('.price-block').className.includes('price-idle')""",
-                    timeout=1500
-                )
-                click_registered = True
+                await page.wait_for_function("() => !document.querySelector('.price-block')?.classList.contains('price-idle')", timeout=1500)
                 log("Price block transitioned out of idle state")
             except Exception:
-                click_registered = False
-
-            if not click_registered:
                 log("[CHAOS DETECTED] Click was dropped by store chaos logic! Re-clicking...")
                 await reveal_btn.click()
 

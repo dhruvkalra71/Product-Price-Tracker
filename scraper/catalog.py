@@ -19,21 +19,17 @@ def fetch_page(page: int = 1, page_size: int = 20) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 def get_full_catalog(max_pages: int = 5) -> List[dict]:
-    all_items = {}
     try:
-        first_page = fetch_page(1, page_size=50)
-        total_pages = min(first_page.get("pages", 1), max_pages)
-        for item in first_page.get("items", []):
-            all_items[item["id"]] = item
-
-        if total_pages > 1:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
-                for page_data in ex.map(lambda p: fetch_page(p, page_size=50), range(2, total_pages + 1)):
-                    for item in page_data.get("items", []):
-                        all_items[item["id"]] = item
+        first = fetch_page(1, page_size=50)
+        pages = min(first.get("pages", 1), max_pages)
+        items = {it["id"]: it for it in first.get("items", [])}
+        if pages > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(pages, 5)) as ex:
+                for data in ex.map(lambda p: fetch_page(p, page_size=50), range(2, pages + 1)):
+                    items.update({it["id"]: it for it in data.get("items", [])})
+        return list(items.values())
     except Exception:
-        pass
-    return list(all_items.values())
+        return []
 
 def search_catalog(query: str, limit: int = 20) -> List[dict]:
     query_clean = query.strip().lower()
