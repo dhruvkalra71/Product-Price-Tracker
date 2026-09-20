@@ -24,10 +24,18 @@ export const api = {
   getProducts: () => request('/api/products'),
   getProductDetail: (id) => request(`/api/products/${id}`),
   searchCatalog: (q) => request(`/api/search?q=${encodeURIComponent(q)}`),
-  trackProduct: (sourceProductId, interval = 120) =>
+  trackProduct: (sourceProductId, interval = 120, metadata = {}) =>
     request('/api/products/track', {
       method: 'POST',
-      body: JSON.stringify({ source_product_id: sourceProductId, scrape_interval_minutes: interval, scrape_now: true }),
+      body: JSON.stringify({
+        source_product_id: sourceProductId,
+        scrape_interval_minutes: interval,
+        scrape_now: true,
+        name: metadata.name,
+        brand: metadata.brand,
+        category: metadata.category,
+        thumbnail_url: metadata.thumbnail_url,
+      }),
     }),
   untrackProduct: (id) =>
     request(`/api/products/${id}/track`, {

@@ -160,14 +160,19 @@ export default function App() {
     loadTrackedProducts();
   }, []);
 
-  // Live auto-polling every 8 seconds on dashboard tab for instant change detection
+  // Adaptive auto-polling: 1.5s when any product is pending initial scrape; 8s when all are idle
   useEffect(() => {
     if (activeTab !== 'dashboard') return;
+    const hasPendingScrapes = trackedProducts.some(
+      (p) => p.latest_price === null || p.latest_status === 'pending'
+    );
+    const pollIntervalMs = hasPendingScrapes ? 1500 : 8000;
+
     const interval = setInterval(() => {
       loadTrackedProducts({ silent: true });
-    }, 8000);
+    }, pollIntervalMs);
     return () => clearInterval(interval);
-  }, [activeTab]);
+  }, [activeTab, trackedProducts]);
 
   // Search handler
   useEffect(() => {
@@ -189,22 +194,25 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  const handleTrack = async (sourceId) => {
+  const handleTrack = async (itemOrId) => {
+    const item = typeof itemOrId === 'object' ? itemOrId : searchResults.find((i) => i.id === itemOrId);
+    const sourceId = item ? item.id : itemOrId;
+
     // 1. Optimistic UI feedback: instantly show as tracked in search results
     setSearchResults((prev) =>
-      prev.map((item) => (item.id === sourceId ? { ...item, is_tracked: true } : item))
+      prev.map((it) => (it.id === sourceId ? { ...it, is_tracked: true } : it))
     );
     setTrackingIds((prev) => new Set(prev).add(sourceId));
 
     try {
-      // 2. Fire tracking request (backend returns in ~10ms with async initial scrape)
-      await api.trackProduct(sourceId);
+      // 2. Fire tracking request with item metadata (backend responds in ~5ms without catalog blocking)
+      await api.trackProduct(sourceId, 120, item || {});
       // 3. Immediately refresh tracked list so the card appears on the dashboard
       await loadTrackedProducts({ silent: true });
     } catch (err) {
       // Revert optimistic update on failure
       setSearchResults((prev) =>
-        prev.map((item) => (item.id === sourceId ? { ...item, is_tracked: false } : item))
+        prev.map((it) => (it.id === sourceId ? { ...it, is_tracked: false } : it))
       );
       alert(`Error tracking product: ${err.message}`);
     } finally {
@@ -556,7 +564,7 @@ export default function App() {
                           Tracking...
                         </button>
                       ) : (
-                        <button className="btn btn-outline-primary btn-sm" onClick={() => handleTrack(item.id)}>
+                        <button className="btn btn-outline-primary btn-sm" onClick={() => handleTrack(item)}>
                           + Track
                         </button>
                       )}

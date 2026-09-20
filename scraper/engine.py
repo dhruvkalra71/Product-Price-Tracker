@@ -138,19 +138,19 @@ async def _scrape_with_page(
             start_y = box["y"] + box["height"] * 0.3
             await page.mouse.move(start_x, start_y)
             
-            for step in range(12):
-                await asyncio.sleep(0.06)
+            # 10 steps at 65ms each = 650ms total dwell with 11 distinct move events
+            for step in range(10):
+                await asyncio.sleep(0.065)
                 cur_x = start_x + (step * 8)
                 cur_y = start_y + ((step % 3) * 6)
                 await page.mouse.move(cur_x, cur_y)
 
             reveal_btn = page.locator('button[aria-label="Reveal price"]')
-            is_disabled = await reveal_btn.is_disabled()
-            if is_disabled:
+            if await reveal_btn.is_disabled():
                 log("Reveal button still disabled by telemetry check, extending dwell time...")
-                for step in range(8):
-                    await asyncio.sleep(0.08)
-                    await page.mouse.move(start_x - (step * 6), start_y + ((step % 2) * 4))
+                for step in range(2):
+                    await asyncio.sleep(0.06)
+                    await page.mouse.move(start_x - (step * 6), start_y + 4)
 
             # Defensive re-check before click (cookie banner can trigger asynchronously on timer during dwell)
             if await _neutralize_cookie_overlay(page, log):
@@ -161,8 +161,12 @@ async def _scrape_with_page(
             await reveal_btn.click()
 
             # 5. Handle chaos click dropper (Xn drops 17.5% of clicks)
+            # Legitimate clicks transition state within ~50-100ms; timeout=500ms quickly catches dropped clicks
             try:
-                await page.wait_for_function("() => !document.querySelector('.price-block')?.classList.contains('price-idle')", timeout=1500)
+                await page.wait_for_function(
+                    "() => !document.querySelector('.price-block')?.classList.contains('price-idle')",
+                    timeout=500
+                )
                 log("Price block transitioned out of idle state")
             except Exception:
                 log("[CHAOS DETECTED] Click was dropped by store chaos logic! Re-clicking...")

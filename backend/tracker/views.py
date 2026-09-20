@@ -68,11 +68,19 @@ class TrackProductView(APIView):
         interval = int(request.data.get("scrape_interval_minutes", 120))
         immediate_scrape = request.data.get("scrape_now", True)
 
-        # Retrieve product metadata from catalog if not already in DB
-        catalog_info = get_product_from_catalog(source_product_id) or {}
-        name = catalog_info.get("name") or f"Product #{source_product_id}"
-        brand = catalog_info.get("brand", "")
-        category = catalog_info.get("category", "")
+        # Retrieve product metadata from request if provided (e.g. from search), otherwise fallback to catalog
+        name = request.data.get("name")
+        brand = request.data.get("brand") or ""
+        category = request.data.get("category") or ""
+        thumbnail_url = request.data.get("thumbnail_url")
+
+        if not name:
+            catalog_info = get_product_from_catalog(source_product_id) or {}
+            name = catalog_info.get("name") or f"Product #{source_product_id}"
+            brand = brand or catalog_info.get("brand", "")
+            category = category or catalog_info.get("category", "")
+            thumbnail_url = thumbnail_url or catalog_info.get("thumbnail_url")
+
         url = f"https://demo.inelabteamdev.com/product/{source_product_id}"
 
         product, created = Product.objects.get_or_create(
@@ -81,6 +89,7 @@ class TrackProductView(APIView):
                 "name": name,
                 "brand": brand,
                 "category": category,
+                "thumbnail_url": thumbnail_url,
                 "url": url,
                 "is_tracked": True,
                 "scrape_interval_minutes": interval,
@@ -92,6 +101,8 @@ class TrackProductView(APIView):
             product.scrape_interval_minutes = interval
             if not product.name or product.name.startswith("Product #"):
                 product.name = name
+            if thumbnail_url and not product.thumbnail_url:
+                product.thumbnail_url = thumbnail_url
             product.save()
 
         # Trigger immediate initial scrape if requested (async in background unless testing/sync)
