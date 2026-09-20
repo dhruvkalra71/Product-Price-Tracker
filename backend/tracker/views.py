@@ -4,6 +4,7 @@ from decimal import Decimal
 import logging
 import sys
 import threading
+from typing import Optional
 from django.conf import settings
 from django.db import connection, transaction
 from django.db.models import Q, F, ExpressionWrapper, DurationField

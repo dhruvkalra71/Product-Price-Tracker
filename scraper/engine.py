@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import logging
 import random
 import re
 import sys
@@ -8,6 +9,8 @@ import time
 import unicodedata
 from dataclasses import asdict, dataclass
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 if sys.platform == "win32":
     try:
