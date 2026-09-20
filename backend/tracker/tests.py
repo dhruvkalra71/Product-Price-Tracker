@@ -255,3 +255,75 @@ class TrackerAPITests(TestCase):
         product = Product.objects.get(source_product_id="401")
         log = product.logs.first()
         self.assertTrue(log.http_or_dom_detail.get("overlay_detected"))
+
+    def test_product_list_includes_alerts(self):
+        from .models import Alert
+        p = Product.objects.create(source_product_id="501", name="Alert Item", is_tracked=True)
+        Alert.objects.create(product=p, type="price_drop", threshold=Decimal("999.00"))
+        Alert.objects.create(product=p, type="back_in_stock")
+
+        resp = self.client.get(reverse("product-list"))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        item = next(x for x in resp.data if x["source_product_id"] == "501")
+        self.assertIn("alerts", item)
+        self.assertEqual(len(item["alerts"]), 2)
+        types = {a["type"] for a in item["alerts"]}
+        self.assertEqual(types, {"price_drop", "back_in_stock"})
+
+    @patch("tracker.views.scrape_product")
+    def test_alerts_trigger_on_scrape(self, mock_scrape):
+        from .models import Alert
+        p = Product.objects.create(source_product_id="601", name="Trigger Item", is_tracked=True)
+        drop_alert = Alert.objects.create(product=p, type="price_drop", threshold=Decimal("1000.00"), notified=False)
+        stock_alert = Alert.objects.create(product=p, type="back_in_stock", notified=False)
+
+        mock_scrape.return_value = ScrapeResult(
+            source_product_id="601",
+            product_name="Trigger Item",
+            price=950.0,
+            currency="INR",
+            in_stock=True,
+            stock_raw="In stock",
+            attempts=1,
+            status="success",
+            error_message=None,
+            logs=["ok"],
+            elapsed_seconds=1.0
+        )
+
+        resp = self.client.post(reverse("scrape-single", kwargs={"pk": p.id}))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        drop_alert.refresh_from_db()
+        stock_alert.refresh_from_db()
+        self.assertTrue(drop_alert.notified)
+        self.assertIsNotNone(drop_alert.triggered_at)
+        self.assertTrue(stock_alert.notified)
+        self.assertIsNotNone(stock_alert.triggered_at)
+
+    def test_update_product_scrape_interval_success(self):
+        p = Product.objects.create(source_product_id="701", name="Interval Item", is_tracked=True, scrape_interval_minutes=120)
+        resp = self.client.patch(reverse("product-detail", kwargs={"pk": p.id}), {
+            "scrape_interval_minutes": 30
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["scrape_interval_minutes"], 30)
+
+        p.refresh_from_db()
+        self.assertEqual(p.scrape_interval_minutes, 30)
+
+    def test_update_product_scrape_interval_validation(self):
+        p = Product.objects.create(source_product_id="702", name="Validation Item", is_tracked=True, scrape_interval_minutes=120)
+
+        # Missing field
+        resp = self.client.patch(reverse("product-detail", kwargs={"pk": p.id}), {})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Value too small (< 5 mins)
+        resp = self.client.patch(reverse("product-detail", kwargs={"pk": p.id}), {"scrape_interval_minutes": 2})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Minimum", resp.data["error"])
+
+        # Value not integer
+        resp = self.client.patch(reverse("product-detail", kwargs={"pk": p.id}), {"scrape_interval_minutes": "invalid"})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)

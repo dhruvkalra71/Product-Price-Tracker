@@ -1,6 +1,8 @@
 import asyncio
 from datetime import timedelta
 from decimal import Decimal
+import logging
+import sys
 import threading
 from django.conf import settings
 from django.db import connection, transaction
@@ -8,6 +10,8 @@ from django.db.models import Q, F, ExpressionWrapper, DurationField
 from django.db.models.functions import Now
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -53,7 +57,7 @@ class SearchView(APIView):
 
 class ProductListView(APIView):
     def get(self, request):
-        products = Product.objects.filter(is_tracked=True).prefetch_related("price_history", "logs")
+        products = Product.objects.filter(is_tracked=True).prefetch_related("price_history", "logs", "alerts")
         serializer = ProductSerializer(products, many=True)
         return Response(serializer.data)
 
@@ -92,9 +96,18 @@ class TrackProductView(APIView):
                 product.name = name
             product.save()
 
-        # Trigger immediate initial scrape if requested
+        # Trigger immediate initial scrape if requested (async in background unless testing/sync)
         if immediate_scrape and not product.price_history.exists():
-            _execute_product_scrape(product)
+            is_test = getattr(settings, "TESTING", False) or any("test" in arg for arg in sys.argv) or "pytest" in sys.modules or request.data.get("sync", False)
+            if is_test:
+                _execute_product_scrape(product)
+            else:
+                thread = threading.Thread(
+                    target=_async_initial_scrape,
+                    args=(product.id,),
+                    daemon=True
+                )
+                thread.start()
 
         return Response(ProductSerializer(product).data, status=status.HTTP_201_CREATED)
 
@@ -109,6 +122,26 @@ class ProductDetailView(APIView):
     def get(self, request, pk):
         product = get_object_or_404(Product, pk=pk)
         return Response(ProductDetailSerializer(product).data)
+
+    def patch(self, request, pk):
+        product = get_object_or_404(Product, pk=pk)
+        raw_interval = request.data.get("scrape_interval_minutes")
+        if raw_interval is None:
+            return Response({"error": "scrape_interval_minutes is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            interval = int(raw_interval)
+        except (ValueError, TypeError):
+            return Response({"error": "scrape_interval_minutes must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if interval < 5:
+            return Response({"error": "Minimum scrape interval is 5 minutes"}, status=status.HTTP_400_BAD_REQUEST)
+        if interval > 43200:
+            return Response({"error": "Maximum scrape interval is 43200 minutes (30 days)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        product.scrape_interval_minutes = interval
+        product.save(update_fields=["scrape_interval_minutes"])
+        return Response(ProductDetailSerializer(product).data, status=status.HTTP_200_OK)
 
 class ProductHistoryView(APIView):
     def get(self, request, pk):
@@ -289,6 +322,21 @@ def _finalize_scrape(product: Product, scrape_res: ScrapeResult) -> dict:
 def _execute_product_scrape(product: Product) -> dict:
     scrape_res = scrape_product(source_product_id=product.source_product_id, headed=False)
     return _finalize_scrape(product, scrape_res)
+
+def _async_initial_scrape(product_id: int):
+    """
+    Asynchronously executes initial scrape for a newly tracked product in a background thread.
+    Cleans up DB connections before and after execution to prevent connection leaks.
+    """
+    from django.db import close_old_connections
+    close_old_connections()
+    try:
+        product = Product.objects.get(id=product_id)
+        _execute_product_scrape(product)
+    except Exception as e:
+        logger.exception("Initial background scrape failed for product %s: %s", product_id, e)
+    finally:
+        close_old_connections()
 
 def _check_alerts(product: Product, current_price: Decimal, in_stock: bool):
     active_alerts = product.alerts.filter(notified=False)

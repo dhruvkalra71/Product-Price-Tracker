@@ -44,4 +44,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ type, threshold }),
     }),
+  updateProductInterval: (id, intervalMinutes) =>
+    request(`/api/products/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ scrape_interval_minutes: intervalMinutes }),
+    }),
 };

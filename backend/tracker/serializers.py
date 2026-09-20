@@ -24,6 +24,7 @@ class ProductSerializer(serializers.ModelSerializer):
     latest_in_stock = serializers.SerializerMethodField()
     latest_stock_raw = serializers.SerializerMethodField()
     latest_status = serializers.SerializerMethodField()
+    alerts = AlertSerializer(many=True, read_only=True)
 
     class Meta:
         model = Product
@@ -31,7 +32,8 @@ class ProductSerializer(serializers.ModelSerializer):
             "id", "source_product_id", "name", "url", "thumbnail_url",
             "brand", "category", "first_seen_at", "is_tracked",
             "scrape_interval_minutes", "last_scraped_at",
-            "latest_price", "latest_in_stock", "latest_stock_raw", "latest_status"
+            "latest_price", "latest_in_stock", "latest_stock_raw", "latest_status",
+            "alerts",
         ]
 
     def get_latest_price(self, obj):
@@ -50,7 +52,6 @@ class ProductSerializer(serializers.ModelSerializer):
 class ProductDetailSerializer(ProductSerializer):
     price_history = PriceHistorySerializer(many=True, read_only=True)
     logs = ScrapeLogSerializer(many=True, read_only=True)
-    alerts = AlertSerializer(many=True, read_only=True)
 
     class Meta(ProductSerializer.Meta):
-        fields = ProductSerializer.Meta.fields + ["price_history", "logs", "alerts"]
+        fields = ProductSerializer.Meta.fields + ["price_history", "logs"]

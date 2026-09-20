@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { api } from './api';
 import {
   LineChart,
@@ -10,6 +10,24 @@ import {
   CartesianGrid,
 } from 'recharts';
 
+const INTERVAL_PRESETS = [
+  { label: 'Every 15 min', value: 15 },
+  { label: 'Every 30 min', value: 30 },
+  { label: 'Every 1 hour', value: 60 },
+  { label: 'Every 2 hours', value: 120 },
+  { label: 'Every 6 hours', value: 360 },
+  { label: 'Every 12 hours', value: 720 },
+  { label: 'Every 24 hours', value: 1440 },
+];
+
+function formatInterval(minutes) {
+  if (!minutes) return '2 hours';
+  if (minutes < 60) return `${minutes} min`;
+  if (minutes % 1440 === 0) return `${minutes / 1440} day${minutes / 1440 > 1 ? 's' : ''}`;
+  if (minutes % 60 === 0) return `${minutes / 60} hour${minutes / 60 > 1 ? 's' : ''}`;
+  return `${minutes} min`;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [trackedProducts, setTrackedProducts] = useState([]);
@@ -20,6 +38,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [trackingIds, setTrackingIds] = useState(new Set());
 
   // Selected product detail modal
   const [selectedProduct, setSelectedProduct] = useState(null);
@@ -27,25 +46,84 @@ export default function App() {
   const [detailTab, setDetailTab] = useState('chart'); // 'chart' | 'table' | 'logs'
   const [scrapingId, setScrapingId] = useState(null);
 
+  // Scrape interval modal state
+  const [modalCustomInterval, setModalCustomInterval] = useState(120);
+  const [showCustomInput, setShowCustomInput] = useState(false);
+
   // Alert form state
+  const [alertType, setAlertType] = useState('price_drop'); // 'price_drop' | 'back_in_stock'
   const [alertThreshold, setAlertThreshold] = useState('');
 
-  const loadTrackedProducts = async () => {
-    setLoading(true);
-    setError(null);
+  // Change detection & live polling state
+  const [priceUpdates, setPriceUpdates] = useState({});
+  const previousPricesRef = useRef({});
+
+  const loadTrackedProducts = async ({ silent = false } = {}) => {
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const data = await api.getProducts();
+
+      // Price change detection
+      const newUpdates = {};
+      data.forEach((p) => {
+        const prev = previousPricesRef.current[p.id];
+        if (prev !== undefined && p.latest_price !== null) {
+          if (prev !== null && p.latest_price !== prev) {
+            const diff = p.latest_price - prev;
+            newUpdates[p.id] = {
+              type: diff < 0 ? 'drop' : 'hike',
+              amount: Math.abs(diff),
+              oldPrice: prev,
+              newPrice: p.latest_price,
+              time: Date.now(),
+            };
+          } else if (prev === null && p.latest_price !== null) {
+            newUpdates[p.id] = {
+              type: 'initial',
+              amount: p.latest_price,
+              oldPrice: null,
+              newPrice: p.latest_price,
+              time: Date.now(),
+            };
+          }
+        }
+        previousPricesRef.current[p.id] = p.latest_price;
+      });
+
+      if (Object.keys(newUpdates).length > 0) {
+        setPriceUpdates((current) => ({ ...current, ...newUpdates }));
+        setTimeout(() => {
+          setPriceUpdates((current) => {
+            const copy = { ...current };
+            Object.keys(newUpdates).forEach((id) => delete copy[id]);
+            return copy;
+          });
+        }, 15000);
+      }
+
       setTrackedProducts(data);
     } catch (err) {
-      setError(err.message);
+      if (!silent) setError(err.message);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
   useEffect(() => {
     loadTrackedProducts();
   }, []);
+
+  // Live auto-polling every 8 seconds on dashboard tab for instant change detection
+  useEffect(() => {
+    if (activeTab !== 'dashboard') return;
+    const interval = setInterval(() => {
+      loadTrackedProducts({ silent: true });
+    }, 8000);
+    return () => clearInterval(interval);
+  }, [activeTab]);
 
   // Search handler
   useEffect(() => {
@@ -68,15 +146,29 @@ export default function App() {
   }, [searchQuery]);
 
   const handleTrack = async (sourceId) => {
+    // 1. Optimistic UI feedback: instantly show as tracked in search results
+    setSearchResults((prev) =>
+      prev.map((item) => (item.id === sourceId ? { ...item, is_tracked: true } : item))
+    );
+    setTrackingIds((prev) => new Set(prev).add(sourceId));
+
     try {
+      // 2. Fire tracking request (backend returns in ~10ms with async initial scrape)
       await api.trackProduct(sourceId);
-      await loadTrackedProducts();
-      if (searchQuery) {
-        const updated = await api.searchCatalog(searchQuery);
-        setSearchResults(updated);
-      }
+      // 3. Immediately refresh tracked list so the card appears on the dashboard
+      await loadTrackedProducts({ silent: true });
     } catch (err) {
-      alert(`Error tracking: ${err.message}`);
+      // Revert optimistic update on failure
+      setSearchResults((prev) =>
+        prev.map((item) => (item.id === sourceId ? { ...item, is_tracked: false } : item))
+      );
+      alert(`Error tracking product: ${err.message}`);
+    } finally {
+      setTrackingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(sourceId);
+        return next;
+      });
     }
   };
 
@@ -96,11 +188,39 @@ export default function App() {
   const handleOpenDetail = async (product) => {
     setSelectedProduct(product);
     setDetailTab('chart');
+    setShowCustomInput(false);
+    setModalCustomInterval(product.scrape_interval_minutes || 120);
     try {
       const detail = await api.getProductDetail(product.id);
       setProductDetail(detail);
+      setModalCustomInterval(detail.scrape_interval_minutes || 120);
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleUpdateInterval = async (productId, minutes) => {
+    const val = parseInt(minutes, 10);
+    if (isNaN(val) || val < 5) {
+      alert('Scrape frequency must be at least 5 minutes.');
+      return;
+    }
+    if (val > 43200) {
+      alert('Scrape frequency cannot exceed 43,200 minutes (30 days).');
+      return;
+    }
+    // Optimistic update in state
+    setTrackedProducts((prev) =>
+      prev.map((p) => (p.id === productId ? { ...p, scrape_interval_minutes: val } : p))
+    );
+    if (productDetail?.id === productId) {
+      setProductDetail((prev) => ({ ...prev, scrape_interval_minutes: val }));
+    }
+    try {
+      await api.updateProductInterval(productId, val);
+    } catch (err) {
+      alert(`Failed to update scrape interval: ${err.message}`);
+      await loadTrackedProducts({ silent: true });
     }
   };
 
@@ -122,13 +242,19 @@ export default function App() {
 
   const handleSetAlert = async (e) => {
     e.preventDefault();
-    if (!selectedProduct || !alertThreshold) return;
+    if (!selectedProduct) return;
+    if (alertType === 'price_drop' && (!alertThreshold || isNaN(alertThreshold))) {
+      alert('Please enter a valid price threshold for the price drop alert.');
+      return;
+    }
     try {
-      await api.addAlert(selectedProduct.id, 'price_drop', parseFloat(alertThreshold));
+      const thresholdVal = alertType === 'price_drop' ? parseFloat(alertThreshold) : null;
+      await api.addAlert(selectedProduct.id, alertType, thresholdVal);
       const detail = await api.getProductDetail(selectedProduct.id);
       setProductDetail(detail);
       setAlertThreshold('');
-      alert('Alert configured successfully!');
+      await loadTrackedProducts({ silent: true });
+      alert(alertType === 'price_drop' ? 'Price drop alert configured!' : 'Back-in-stock alert configured!');
     } catch (err) {
       alert(`Failed to create alert: ${err.message}`);
     }
@@ -173,6 +299,16 @@ export default function App() {
       {/* DASHBOARD TAB */}
       {activeTab === 'dashboard' && (
         <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '0.75rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+              <span className="pulse-dot"></span>
+              <span>Live sync active (auto-updates every 8s)</span>
+            </div>
+            <button className="btn btn-secondary btn-sm" onClick={() => loadTrackedProducts()}>
+              ↻ Refresh Now
+            </button>
+          </div>
+
           {loading && <p style={{ color: 'var(--text-muted)' }}>Loading tracked items...</p>}
 
           {!loading && trackedProducts.length === 0 && (
@@ -189,17 +325,30 @@ export default function App() {
 
           <div className="grid-cards">
             {trackedProducts.map((p) => {
-              const statusBadge =
-                { success: 'badge-success', retried_then_success: 'badge-warning', failed: 'badge-danger' }[p.latest_status] || 'badge-neutral';
+              const updateInfo = priceUpdates[p.id];
 
               return (
-                <div key={p.id} className="card">
+                <div key={p.id} className={`card ${updateInfo ? 'card-updated' : ''}`}>
                   <div>
                     <div className="card-header">
                       <span className="mono" style={{ color: 'var(--text-muted)' }}>
                         #{p.source_product_id}
                       </span>
-                      <span className={`badge ${statusBadge}`}>{p.latest_status.replace(/_/g, ' ')}</span>
+                      {updateInfo && (
+                        updateInfo.type === 'drop' ? (
+                          <span className="badge badge-success flash-badge">
+                            ↓ Dropped by ₹{updateInfo.amount.toLocaleString('en-IN')}!
+                          </span>
+                        ) : updateInfo.type === 'hike' ? (
+                          <span className="badge badge-warning flash-badge">
+                            ↑ Updated: ₹{updateInfo.newPrice.toLocaleString('en-IN')}
+                          </span>
+                        ) : (
+                          <span className="badge badge-success flash-badge">
+                            ✨ Price ready: ₹{updateInfo.newPrice.toLocaleString('en-IN')}
+                          </span>
+                        )
+                      )}
                     </div>
 
                     <h3 style={{ fontSize: '1.1rem', marginBottom: '0.5rem' }}>{p.name}</h3>
@@ -211,10 +360,77 @@ export default function App() {
                       <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
                         Stock: {p.latest_stock_raw || (p.latest_in_stock ? 'In Stock' : 'Out of Stock')}
                       </div>
+                      {p.latest_price == null && (
+                        <div style={{ fontSize: '0.8rem', color: 'var(--primary)', marginTop: '0.25rem', fontStyle: 'italic' }}>
+                          ⚡ Initial scrape in progress...
+                        </div>
+                      )}
+                    </div>
+
+                    {/* UI Indications for alerts (price drop & back in stock) */}
+                    {p.alerts && p.alerts.length > 0 && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', margin: '0.6rem 0' }}>
+                        {p.alerts.map((alert) => (
+                          <div
+                            key={alert.id}
+                            className={`alert-pill ${alert.triggered_at ? 'alert-pill-triggered' : 'alert-pill-active'}`}
+                          >
+                            {alert.type === 'price_drop' ? (
+                              alert.triggered_at ? (
+                                <span>🔔 Price dropped below ₹{Number(alert.threshold).toLocaleString('en-IN')}!</span>
+                              ) : (
+                                <span>🎯 Target: &le; ₹{Number(alert.threshold).toLocaleString('en-IN')}</span>
+                              )
+                            ) : (
+                              alert.triggered_at ? (
+                                <span>📦 Back in stock alert triggered!</span>
+                              ) : (
+                                <span>📦 Back-in-stock watch active</span>
+                              )
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Scrape Frequency Selector */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.8rem', margin: '0.6rem 0' }}>
+                      <span style={{ color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        ⏱️ Check:
+                      </span>
+                      <select
+                        className="interval-select"
+                        value={
+                          INTERVAL_PRESETS.some((opt) => opt.value === p.scrape_interval_minutes)
+                            ? p.scrape_interval_minutes
+                            : 'custom'
+                        }
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (val === 'custom') {
+                            const input = prompt('Enter scrape interval in minutes (minimum 5):', p.scrape_interval_minutes || 120);
+                            if (input !== null) handleUpdateInterval(p.id, input);
+                          } else {
+                            handleUpdateInterval(p.id, val);
+                          }
+                        }}
+                      >
+                        {INTERVAL_PRESETS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                        {!INTERVAL_PRESETS.some((opt) => opt.value === p.scrape_interval_minutes) && (
+                          <option value="custom">Custom ({p.scrape_interval_minutes}m)</option>
+                        )}
+                        {INTERVAL_PRESETS.some((opt) => opt.value === p.scrape_interval_minutes) && (
+                          <option value="custom">Custom...</option>
+                        )}
+                      </select>
                     </div>
 
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
-                      Last scraped:{' '}
+                      Last updated:{' '}
                       {p.last_scraped_at ? new Date(p.last_scraped_at).toLocaleTimeString() : 'Never'}
                     </div>
                   </div>
@@ -280,7 +496,11 @@ export default function App() {
                     <td>{item.category}</td>
                     <td>
                       {item.is_tracked ? (
-                        <span className="badge badge-success">Tracked</span>
+                        <span className="badge badge-success">Tracked ✓</span>
+                      ) : trackingIds.has(item.id) ? (
+                        <button className="btn btn-secondary btn-sm" disabled>
+                          Tracking...
+                        </button>
                       ) : (
                         <button className="btn btn-primary btn-sm" onClick={() => handleTrack(item.id)}>
                           + Track
@@ -517,21 +737,176 @@ export default function App() {
               </div>
             )}
 
+            {/* Scrape Schedule & Frequency */}
+            <div style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <div>
+                  <h4 style={{ fontSize: '0.95rem', fontWeight: 600 }}>Scrape Schedule & Frequency</h4>
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                    How frequently this product is scraped for price changes and alert evaluation.
+                  </p>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <select
+                    className="interval-select"
+                    style={{ padding: '0.35rem 0.65rem', fontSize: '0.85rem' }}
+                    value={
+                      INTERVAL_PRESETS.some((opt) => opt.value === productDetail.scrape_interval_minutes)
+                        ? productDetail.scrape_interval_minutes
+                        : 'custom'
+                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === 'custom') {
+                        setModalCustomInterval(productDetail.scrape_interval_minutes || 120);
+                        setShowCustomInput(true);
+                      } else {
+                        setShowCustomInput(false);
+                        handleUpdateInterval(productDetail.id, val);
+                      }
+                    }}
+                  >
+                    {INTERVAL_PRESETS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                    {!INTERVAL_PRESETS.some((opt) => opt.value === productDetail.scrape_interval_minutes) && (
+                      <option value="custom">Custom ({productDetail.scrape_interval_minutes}m)</option>
+                    )}
+                    {INTERVAL_PRESETS.some((opt) => opt.value === productDetail.scrape_interval_minutes) && (
+                      <option value="custom">Custom...</option>
+                    )}
+                  </select>
+                </div>
+              </div>
+
+              {showCustomInput && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#f8fafc', padding: '0.65rem 0.85rem', borderRadius: '6px', border: '1px solid var(--border)', marginBottom: '0.75rem' }}>
+                  <span style={{ fontSize: '0.85rem', color: 'var(--text-main)' }}>Custom interval in minutes (min 5):</span>
+                  <input
+                    type="number"
+                    min="5"
+                    max="43200"
+                    className="search-input"
+                    style={{ maxWidth: 110, padding: '0.3rem 0.5rem', fontSize: '0.85rem' }}
+                    value={modalCustomInterval}
+                    onChange={(e) => setModalCustomInterval(e.target.value)}
+                  />
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={() => {
+                      handleUpdateInterval(productDetail.id, modalCustomInterval);
+                      setShowCustomInput(false);
+                    }}
+                  >
+                    Save
+                  </button>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setShowCustomInput(false)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
+                <span>
+                  Current schedule: <strong>{formatInterval(productDetail.scrape_interval_minutes)}</strong> ({productDetail.scrape_interval_minutes} min)
+                </span>
+                {productDetail.last_scraped_at && (
+                  <span>
+                    Next projected check:{' '}
+                    <strong>
+                      {new Date(
+                        new Date(productDetail.last_scraped_at).getTime() +
+                          productDetail.scrape_interval_minutes * 60 * 1000
+                      ).toLocaleTimeString()}
+                    </strong>
+                  </span>
+                )}
+              </div>
+            </div>
+
             {/* Alert Configuration */}
             <div style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
-              <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Set Price Drop Alert</h4>
-              <form onSubmit={handleSetAlert} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                <input
-                  type="number"
-                  placeholder="Target price in ₹ (e.g. 10000)"
-                  className="search-input"
-                  style={{ maxWidth: 260 }}
-                  value={alertThreshold}
-                  onChange={(e) => setAlertThreshold(e.target.value)}
-                />
-                <button type="submit" className="btn btn-secondary btn-sm">
-                  Save Alert
-                </button>
+              <h4 style={{ fontSize: '0.95rem', marginBottom: '0.75rem' }}>Price & Stock Alerts</h4>
+
+              {/* Active & Triggered Alerts List */}
+              {productDetail.alerts && productDetail.alerts.length > 0 && (
+                <div className="alert-list" style={{ marginBottom: '1rem' }}>
+                  {productDetail.alerts.map((a) => (
+                    <div key={a.id} className="alert-item">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span>{a.type === 'price_drop' ? '🔔' : '📦'}</span>
+                        <div>
+                          <strong>{a.type === 'price_drop' ? 'Price Drop Alert' : 'Back-in-Stock Alert'}</strong>
+                          {a.type === 'price_drop' && a.threshold && (
+                            <span style={{ color: 'var(--text-muted)', marginLeft: '0.5rem' }}>
+                              (Target: &le; ₹{Number(a.threshold).toLocaleString('en-IN')})
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div>
+                        {a.triggered_at ? (
+                          <span className="badge badge-success">
+                            Triggered {new Date(a.triggered_at).toLocaleTimeString()}
+                          </span>
+                        ) : (
+                          <span className="badge badge-neutral">Active (Monitoring)</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Alert Creation Form */}
+              <form onSubmit={handleSetAlert} style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+                  <label style={{ fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.35rem', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="alertType"
+                      value="price_drop"
+                      checked={alertType === 'price_drop'}
+                      onChange={() => setAlertType('price_drop')}
+                    />
+                    <span>Price Drop Alert</span>
+                  </label>
+                  <label style={{ fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.35rem', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="alertType"
+                      value="back_in_stock"
+                      checked={alertType === 'back_in_stock'}
+                      onChange={() => setAlertType('back_in_stock')}
+                    />
+                    <span>Back in Stock Alert</span>
+                  </label>
+                </div>
+
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                  {alertType === 'price_drop' ? (
+                    <input
+                      type="number"
+                      placeholder="Target price in ₹ (e.g. 10000)"
+                      className="search-input"
+                      style={{ maxWidth: 280 }}
+                      value={alertThreshold}
+                      onChange={(e) => setAlertThreshold(e.target.value)}
+                    />
+                  ) : (
+                    <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                      You will be notified immediately when this product is back in stock.
+                    </span>
+                  )}
+                  <button type="submit" className="btn btn-secondary btn-sm">
+                    Set Alert
+                  </button>
+                </div>
               </form>
             </div>
           </div>
