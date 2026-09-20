@@ -75,3 +75,14 @@ class Alert(models.Model):
 
     def __str__(self):
         return f"Alert for {self.product.name} ({self.type})"
+
+class CatalogCache(models.Model):
+    key = models.CharField(max_length=64, unique=True, default="full_catalog")
+    data = models.JSONField(default=list)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "tracker_catalogcache"
+
+    def __str__(self):
+        return f"CatalogCache({self.key}, items={len(self.data)}, updated_at={self.updated_at})"

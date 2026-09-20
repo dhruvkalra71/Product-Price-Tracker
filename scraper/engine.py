@@ -50,6 +50,56 @@ def clean_price_string(raw: str) -> Optional[float]:
     except ValueError:
         return None
 
+def _parse_font_size(fs_str: str) -> float:
+    m = re.search(r"([\d.]+)", str(fs_str or ""))
+    return float(m.group(1)) if m else 0.0
+
+def _parse_font_weight(fw_str: str) -> int:
+    fw_lower = str(fw_str or "").lower().strip()
+    if fw_lower in ("bold", "bolder"):
+        return 700
+    if fw_lower in ("normal", "lighter"):
+        return 400
+    m = re.search(r"(\d+)", fw_lower)
+    return int(m.group(1)) if m else 400
+
+def select_price_candidate(candidates: List[dict], log_fn=None) -> dict:
+    """
+    Selects the candidate whose computed fontSize is closest to 38.4px
+    AND fontWeight is >= 700 (genuine price signature per docs/site-notes.md).
+    Falls back to position 0 and logs a warning if no candidates match or if ambiguous.
+    """
+    if not candidates:
+        return {}
+    if len(candidates) == 1:
+        return candidates[0]
+
+    TARGET_SIZE = 38.4
+    matching_candidates = []
+
+    for c in candidates:
+        fs = _parse_font_size(c.get("fontSize", ""))
+        fw = _parse_font_weight(c.get("fontWeight", ""))
+        if fw >= 700:
+            diff = abs(fs - TARGET_SIZE)
+            if diff <= 6.0:  # Matches genuine 38.4px (2.4rem) element
+                matching_candidates.append((diff, c))
+
+    if matching_candidates:
+        matching_candidates.sort(key=lambda x: x[0])
+        best_diff, best_cand = matching_candidates[0]
+        closest_count = sum(1 for d, _ in matching_candidates if abs(d - best_diff) < 0.1)
+        if closest_count > 1 and log_fn:
+            log_fn(f"[WARNING] Multiple candidates matched font signature (~38.4px, weight >= 700). Selected '{best_cand.get('text')}'.")
+        elif log_fn and best_cand != candidates[0]:
+            log_fn(f"Selected candidate matching genuine price signature ({best_cand.get('fontSize')}, weight {best_cand.get('fontWeight')}): '{best_cand.get('text')}' (overrode index 0: '{candidates[0].get('text')}')")
+        return best_cand
+
+    # None matched well - fallback to candidates[0] and log warning
+    if log_fn:
+        log_fn(f"[WARNING] No price candidate strongly matched signature (38.4px, weight >= 700). Falling back to position 0 candidate: '{candidates[0].get('text')}'. Candidates: {candidates}")
+    return candidates[0]
+
 COOKIE_SUPPRESSION_CSS = ".cookie-overlay { display: none !important; pointer-events: none !important; }"
 
 async def _neutralize_cookie_overlay(page, log) -> bool:
@@ -156,9 +206,9 @@ async def _scrape_with_page(
             if await _neutralize_cookie_overlay(page, log):
                 overlay_detected = True
 
-            # 4. Click reveal button
+            # 4. Click reveal button (with 8s timeout to prevent 30s hangs)
             log("Clicking 'Reveal price' button...")
-            await reveal_btn.click()
+            await reveal_btn.click(timeout=8000)
 
             # 5. Handle chaos click dropper (Xn drops 17.5% of clicks)
             # Legitimate clicks transition state within ~50-100ms; timeout=500ms quickly catches dropped clicks
@@ -170,11 +220,11 @@ async def _scrape_with_page(
                 log("Price block transitioned out of idle state")
             except Exception:
                 log("[CHAOS DETECTED] Click was dropped by store chaos logic! Re-clicking...")
-                await reveal_btn.click()
+                await reveal_btn.click(timeout=8000)
 
             # 6. Wait for price-success or price-error
             log("Waiting for price quote resolution (WASM + API exchange)...")
-            await page.wait_for_selector(".price-success, .price-error", timeout=18000)
+            await page.wait_for_selector(".price-success, .price-error", timeout=15000)
             final_classes = await price_block.get_attribute("class") or ""
 
             if "price-error" in final_classes:
@@ -220,8 +270,9 @@ async def _scrape_with_page(
                 if not candidates:
                     raise RuntimeError("No visible price candidate found after reveal")
 
-                # The real price element has large font (font-size 2.4rem ~ 38px, font-weight 700)
-                chosen_cand = candidates[0]["text"]
+                # The real price element has large font (font-size 2.4rem ~ 38.4px, font-weight >= 700)
+                best_candidate = select_price_candidate(candidates, log)
+                chosen_cand = best_candidate.get("text", "")
                 price_val = clean_price_string(chosen_cand)
                 
                 if price_val is None:
@@ -253,10 +304,14 @@ async def _scrape_with_page(
             base_delay = 2
             max_delay = 20
             if attempt < max_retries:
-                exponential = base_delay * (2 ** (attempt - 1))  # 2, 4, 8 for attempts 1, 2, 3
-                backoff = random.uniform(0, min(max_delay, exponential))
-                log(f"Backing off for {backoff:.2f}s before retry (full jitter)...")
+                exponential = base_delay * (2 ** (attempt - 1))  # 2, 4 for attempts 1, 2
+                backoff = random.uniform(0.5, min(max_delay, exponential))
+                log(f"Backing off for {backoff:.2f}s before clean retry...")
                 await asyncio.sleep(backoff)
+                try:
+                    await page.goto("about:blank", timeout=3000)
+                except Exception:
+                    pass
 
     log(f"All {max_retries} attempts exhausted without success.")
     return ScrapeResult(
@@ -309,10 +364,24 @@ async def scrape_products_batch(
         if sys.platform == "win32":
             try:
                 browser = await p.chromium.launch(channel="msedge", headless=headless)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.info("Msedge channel not available or launch failed: %s. Falling back to default chromium.", e)
         if browser is None:
-            browser = await p.chromium.launch(headless=headless)
+            try:
+                browser = await p.chromium.launch(headless=headless)
+            except Exception as e:
+                logger.critical(
+                    "Playwright failed to launch Chromium browser: %s. "
+                    "Verify browser binaries via `python -m playwright install chromium` "
+                    "and check that host memory is sufficient.",
+                    e,
+                    exc_info=True
+                )
+                raise RuntimeError(
+                    f"Playwright Chromium launch failed: {e}. "
+                    "Ensure browser binaries are installed (`python -m playwright install chromium`) "
+                    "and host memory is sufficient."
+                ) from e
 
         async def scrape_one(pid):
             pid_str = str(pid)

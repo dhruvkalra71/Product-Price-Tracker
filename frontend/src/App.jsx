@@ -69,6 +69,8 @@ export default function App() {
   // Selected product detail modal
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [productDetail, setProductDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState(null);
   const [detailTab, setDetailTab] = useState('chart'); // 'chart' | 'table' | 'logs'
   const [scrapingId, setScrapingId] = useState(null);
 
@@ -160,38 +162,69 @@ export default function App() {
     loadTrackedProducts();
   }, []);
 
+  const isStaleScrape = (p) => {
+    if (p.latest_price !== null) return false;
+    if (!p.last_scraped_at && p.first_seen_at) {
+      const ageMs = Date.now() - new Date(p.first_seen_at).getTime();
+      return ageMs > 3 * 60 * 1000; // 3 minutes
+    }
+    return false;
+  };
+
   // Adaptive auto-polling: 1.5s when any product is pending initial scrape; 8s when all are idle
+  const hasPendingScrapes = trackedProducts.some(
+    (p) => p.latest_price === null && p.latest_status !== 'failed' && !isStaleScrape(p)
+  );
+
   useEffect(() => {
     if (activeTab !== 'dashboard') return;
-    const hasPendingScrapes = trackedProducts.some(
-      (p) => p.latest_price === null || p.latest_status === 'pending'
-    );
     const pollIntervalMs = hasPendingScrapes ? 1500 : 8000;
 
     const interval = setInterval(() => {
       loadTrackedProducts({ silent: true });
     }, pollIntervalMs);
     return () => clearInterval(interval);
-  }, [activeTab, trackedProducts]);
+  }, [activeTab, hasPendingScrapes]);
 
-  // Search handler
+  // Search handler with active query reference and AbortController to eliminate race conditions
+  const activeSearchQueryRef = useRef('');
+
   useEffect(() => {
-    if (!searchQuery.trim()) {
+    const trimmed = searchQuery.trim();
+    activeSearchQueryRef.current = trimmed;
+
+    if (!trimmed) {
       setSearchResults([]);
+      setSearchLoading(false);
       return;
     }
+
+    setSearchLoading(true);
+    const controller = new AbortController();
+
     const timer = setTimeout(async () => {
-      setSearchLoading(true);
       try {
-        const res = await api.searchCatalog(searchQuery);
-        setSearchResults(res);
+        const res = await api.searchCatalog(trimmed, controller.signal);
+        // Only update if this response corresponds to the currently active query
+        if (activeSearchQueryRef.current === trimmed) {
+          setSearchResults(res);
+        }
       } catch (err) {
-        console.error(err);
+        if (err.name === 'AbortError') return;
+        if (activeSearchQueryRef.current === trimmed) {
+          console.error('Search error:', err);
+        }
       } finally {
-        setSearchLoading(false);
+        if (activeSearchQueryRef.current === trimmed) {
+          setSearchLoading(false);
+        }
       }
-    }, 300);
-    return () => clearTimeout(timer);
+    }, 250);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [searchQuery]);
 
   const handleTrack = async (itemOrId) => {
@@ -237,18 +270,28 @@ export default function App() {
     }
   };
 
-  const handleOpenDetail = async (product) => {
-    setSelectedProduct(product);
-    setDetailTab('chart');
-    setShowCustomInput(false);
-    setModalCustomInterval(product.scrape_interval_minutes || 120);
+  const fetchProductDetail = async (product) => {
+    setDetailLoading(true);
+    setDetailError(null);
     try {
       const detail = await api.getProductDetail(product.id);
       setProductDetail(detail);
       setModalCustomInterval(detail.scrape_interval_minutes || 120);
     } catch (err) {
-      console.error(err);
+      console.error('Failed to load product detail:', err);
+      setDetailError(err.message || 'Failed to load product details');
+    } finally {
+      setDetailLoading(false);
     }
+  };
+
+  const handleOpenDetail = (product) => {
+    setSelectedProduct(product);
+    setProductDetail(null);
+    setDetailTab('chart');
+    setShowCustomInput(false);
+    setModalCustomInterval(product.scrape_interval_minutes || 120);
+    fetchProductDetail(product);
   };
 
   const handleUpdateInterval = async (productId, minutes) => {
@@ -365,7 +408,7 @@ export default function App() {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '0.75rem' }}>
             <div className="live-sync-pill">
               <span className="pulse-dot"></span>
-              <span>Live sync active (auto-updates every 8s)</span>
+              <span>Live sync active (auto-updates every {hasPendingScrapes ? '1.5s' : '8s'})</span>
             </div>
             <button className="btn btn-secondary btn-sm" onClick={() => loadTrackedProducts()}>
               ↻ Refresh Now
@@ -447,8 +490,33 @@ export default function App() {
                       <div style={{ marginTop: '0.45rem' }}>
                         {p.latest_price != null ? (
                           renderStockBadge(p.latest_stock_raw, p.latest_in_stock)
+                        ) : (p.latest_status === 'failed' || isStaleScrape(p)) ? (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: '0.78rem', color: '#ef4444', fontWeight: 600 }}>
+                                ⚠️ {isStaleScrape(p) && p.latest_status !== 'failed' ? 'Scrape timed out' : 'Initial scrape failed'}
+                              </span>
+                              <button
+                                className="btn btn-outline-primary btn-sm"
+                                style={{ padding: '0.2rem 0.6rem', fontSize: '0.75rem' }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleManualScrape(p.id);
+                                }}
+                                disabled={scrapingId === p.id}
+                              >
+                                {scrapingId === p.id ? 'Scraping...' : '🔄 Retry Scrape'}
+                              </button>
+                            </div>
+                            {p.latest_error && (
+                              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', wordBreak: 'break-word' }}>
+                                {p.latest_error}
+                              </span>
+                            )}
+                          </div>
                         ) : (
-                          <span style={{ fontSize: '0.8rem', color: 'var(--primary)', fontStyle: 'italic' }}>
+                          <span style={{ fontSize: '0.8rem', color: 'var(--primary)', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span className="spinner-border spinner-border-sm" style={{ width: '12px', height: '12px', borderWidth: '2px' }} />
                             ⚡ Initial scrape in progress...
                           </span>
                         )}
@@ -592,8 +660,8 @@ export default function App() {
       )}
 
       {/* PRODUCT DETAIL MODAL */}
-      {selectedProduct && productDetail && (
-        <div className="modal-overlay" onClick={() => setSelectedProduct(null)}>
+      {selectedProduct && (
+        <div className="modal-overlay" onClick={() => { setSelectedProduct(null); setProductDetail(null); setDetailError(null); }}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <div>
@@ -610,12 +678,35 @@ export default function App() {
                   Open live page on INE storefront ↗
                 </a>
               </div>
-              <button className="close-btn" onClick={() => setSelectedProduct(null)}>
+              <button className="close-btn" onClick={() => { setSelectedProduct(null); setProductDetail(null); setDetailError(null); }}>
                 &times;
               </button>
             </div>
 
-            {/* Quick stats banner */}
+            {detailLoading && (
+              <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+                <span className="spinner-border spinner-border-sm" style={{ width: '18px', height: '18px', marginRight: '8px', borderWidth: '2px' }} />
+                Loading product history and logs...
+              </div>
+            )}
+
+            {detailError && !detailLoading && (
+              <div style={{ padding: '2rem', textAlign: 'center' }}>
+                <div style={{ color: 'var(--danger)', marginBottom: '1rem', fontWeight: 600 }}>
+                  ⚠️ Error loading product details: {detailError}
+                </div>
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={() => fetchProductDetail(selectedProduct)}
+                >
+                  🔄 Retry
+                </button>
+              </div>
+            )}
+
+            {productDetail && !detailLoading && !detailError && (
+              <>
+                {/* Quick stats banner */}
             <div style={{ display: 'flex', gap: '2rem', padding: '1rem', background: 'var(--alert-item-bg)', border: '1px solid var(--border)', borderRadius: '8px', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
               <div>
                 <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Latest Price</div>
@@ -1015,6 +1106,8 @@ export default function App() {
                 </div>
               </form>
             </div>
+            </>
+            )}
           </div>
         </div>
       )}

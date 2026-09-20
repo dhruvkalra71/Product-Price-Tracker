@@ -25,8 +25,56 @@ from .serializers import (
 from scraper.catalog import search_catalog, get_product_from_catalog
 from scraper.engine import scrape_product, scrape_products_batch, ScrapeResult
 
-# In-memory lock to prevent overlapping background scrape runs
-scrape_lock = threading.Lock()
+SCRAPE_ADVISORY_LOCK_KEY = 847291038471
+
+class ScrapeLock:
+    """
+    Cross-process distributed lock using Postgres session advisory locks
+    (pg_try_advisory_lock / pg_advisory_unlock) to coordinate scrapes across
+    multiple gunicorn worker processes, with an in-memory threading.Lock as a
+    fast in-process check and SQLite dev fallback.
+    """
+    def __init__(self):
+        self._thread_lock = threading.Lock()
+
+    def acquire(self, blocking: bool = False) -> bool:
+        # 1. Fast in-process thread lock check
+        if not self._thread_lock.acquire(blocking=blocking):
+            return False
+
+        # 2. Cross-process Postgres advisory lock if running on PostgreSQL
+        if connection.vendor == "postgresql":
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_try_advisory_lock(%s);", [SCRAPE_ADVISORY_LOCK_KEY])
+                    row = cursor.fetchone()
+                    acquired = bool(row and row[0])
+                if not acquired:
+                    self._thread_lock.release()
+                    return False
+            except Exception as e:
+                logger.warning("Error acquiring Postgres advisory lock: %s", e)
+                self._thread_lock.release()
+                return False
+
+        return True
+
+    def release(self):
+        try:
+            if connection.vendor == "postgresql":
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute("SELECT pg_advisory_unlock(%s);", [SCRAPE_ADVISORY_LOCK_KEY])
+                except Exception as e:
+                    logger.warning("Error releasing Postgres advisory lock: %s", e)
+        finally:
+            if self._thread_lock.locked():
+                self._thread_lock.release()
+
+    def locked(self) -> bool:
+        return self._thread_lock.locked()
+
+scrape_lock = ScrapeLock()
 
 class PingView(APIView):
     """
@@ -174,25 +222,33 @@ class AlertConfigView(APIView):
 class ManualScrapeView(APIView):
     def post(self, request, pk):
         product = get_object_or_404(Product, pk=pk)
-        res = _execute_product_scrape(product)
-        return Response(res)
+        if not scrape_lock.acquire(blocking=False):
+            return Response(
+                {"error": "A scrape is already in progress. Please try again shortly."},
+                status=status.HTTP_409_CONFLICT
+            )
+        try:
+            res = _execute_product_scrape(product)
+            return Response(res)
+        finally:
+            scrape_lock.release()
 
 class RunScrapeView(APIView):
     """
     Cron entry point. Auth-protected by X-Scrape-Secret header.
-    Validates secret, acquires non-blocking scrape_lock, queries due products,
+    Validates secret, acquires non-blocking cross-process scrape_lock, queries due products,
     spawns a background thread to execute the scrape asynchronously,
     and returns 202 Accepted immediately.
     """
     def post(self, request):
-        # 1. Authenticate cron request
+        # 1. Authenticate cron request (fail-closed if secret is unset)
         secret_header = (request.headers.get("X-Scrape-Secret") or request.headers.get("Authorization", "")).removeprefix("Bearer ").strip()
 
         configured_secret = getattr(settings, "SCRAPE_SHARED_SECRET", "")
-        if configured_secret and secret_header != configured_secret:
+        if not configured_secret or secret_header != configured_secret:
             return Response({"error": "Unauthorized cron trigger"}, status=status.HTTP_401_UNAUTHORIZED)
 
-        # 2. Acquire in-process lock to prevent overlapping runs
+        # 2. Acquire cross-process lock to prevent overlapping runs
         if not scrape_lock.acquire(blocking=False):
             return Response(
                 {"status": "already_running", "message": "Scrape run currently in progress"},
@@ -290,6 +346,10 @@ def _finalize_scrape(product: Product, scrape_res: ScrapeResult) -> dict:
             }
         )
 
+        # Inspect previous entry before creating new PriceHistory
+        previous_entry = product.price_history.first()
+        previous_in_stock = previous_entry.in_stock if previous_entry else None
+
         # 2. ONLY write to PriceHistory when there is a valid verified price
         if scrape_res.price is not None:
             PriceHistory.objects.create(
@@ -305,9 +365,16 @@ def _finalize_scrape(product: Product, scrape_res: ScrapeResult) -> dict:
                 product.name = scrape_res.product_name
 
             # Check alerts
-            _check_alerts(product, Decimal(str(scrape_res.price)), scrape_res.in_stock)
+            _check_alerts(product, Decimal(str(scrape_res.price)), scrape_res.in_stock, previous_in_stock)
+            product.last_scraped_at = t_finish
+        else:
+            # If initial scrape failed (no price history ever recorded), do NOT set last_scraped_at
+            # so scheduled cron triggers and immediate retries pick it up without waiting for interval
+            if not product.price_history.exists():
+                product.last_scraped_at = None
+            else:
+                product.last_scraped_at = t_finish
 
-        product.last_scraped_at = t_finish
         product.save()
 
     return {
@@ -326,22 +393,86 @@ def _execute_product_scrape(product: Product) -> dict:
     scrape_res = scrape_product(source_product_id=product.source_product_id, headed=False)
     return _finalize_scrape(product, scrape_res)
 
-def _async_initial_scrape(product_id: int):
+def _async_initial_scrape(product_id: int, max_attempts: int = 3, retry_delay: float = 2.0):
     """
     Asynchronously executes initial scrape for a newly tracked product in a background thread.
+    Coordinates with the cross-process scrape_lock, retrying with backoff if another
+    scrape is currently executing.
     Cleans up DB connections before and after execution to prevent connection leaks.
     """
+    import time
     from django.db import close_old_connections
     close_old_connections()
+    product = None
+    lock_acquired = False
+    for attempt in range(1, max_attempts + 1):
+        if scrape_lock.acquire(blocking=False):
+            lock_acquired = True
+            break
+        if attempt < max_attempts:
+            logger.info(
+                "Scrape lock busy; initial scrape for product %s retrying in %ss (attempt %d/%d)",
+                product_id, retry_delay, attempt, max_attempts
+            )
+            time.sleep(retry_delay)
+
+    if not lock_acquired:
+        logger.warning(
+            "Could not acquire scrape lock for initial scrape of product %s after %d attempts",
+            product_id, max_attempts
+        )
+        try:
+            product = Product.objects.get(id=product_id)
+            now = timezone.now()
+            with transaction.atomic():
+                ScrapeLog.objects.create(
+                    product=product,
+                    started_at=now,
+                    finished_at=now,
+                    status="failed",
+                    attempt_count=max_attempts,
+                    error_message="Scrape lock busy; retry shortly",
+                    http_or_dom_detail={"error": "Lock acquisition failed", "context": "_async_initial_scrape"}
+                )
+                product.last_scraped_at = None
+                product.save()
+        except Exception as e:
+            logger.exception("Failed to record lock failure for product %s: %s", product_id, e)
+        finally:
+            close_old_connections()
+        return
+
     try:
         product = Product.objects.get(id=product_id)
         _execute_product_scrape(product)
     except Exception as e:
         logger.exception("Initial background scrape failed for product %s: %s", product_id, e)
+        if product is not None:
+            try:
+                now = timezone.now()
+                with transaction.atomic():
+                    ScrapeLog.objects.create(
+                        product=product,
+                        started_at=now,
+                        finished_at=now,
+                        status="failed",
+                        attempt_count=1,
+                        error_message=str(e),
+                        http_or_dom_detail={"error": str(e), "context": "_async_initial_scrape crash"}
+                    )
+                    # Keep last_scraped_at as None if no price history exists, mirroring _finalize_scrape
+                    if not product.price_history.exists():
+                        product.last_scraped_at = None
+                    else:
+                        product.last_scraped_at = now
+                    product.save()
+            except Exception as log_err:
+                logger.exception("Failed to record error ScrapeLog for product %s: %s", product_id, log_err)
     finally:
+        scrape_lock.release()
         close_old_connections()
 
-def _check_alerts(product: Product, current_price: Decimal, in_stock: bool):
+def _check_alerts(product: Product, current_price: Decimal, in_stock: bool, previous_in_stock: Optional[bool] = None):
     active_alerts = product.alerts.filter(notified=False)
     for alert in active_alerts:
         triggered = False
@@ -349,7 +480,9 @@ def _check_alerts(product: Product, current_price: Decimal, in_stock: bool):
             if current_price <= alert.threshold:
                 triggered = True
         elif alert.type == "back_in_stock":
-            if in_stock is True:
+            # Only trigger when stock actually transitions from out-of-stock (False) to in-stock (True).
+            # If there was no previous history (first-ever scrape), do NOT treat it as "back in stock".
+            if previous_in_stock is False and in_stock is True:
                 triggered = True
 
         if triggered:

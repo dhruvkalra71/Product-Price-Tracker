@@ -12,6 +12,8 @@ from scraper.engine import ScrapeResult
 class TrackerAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        from django.conf import settings
+        settings.SCRAPE_SHARED_SECRET = "ine-tracker-cron-secret-2026"
 
     def test_ping_endpoint(self):
         resp = self.client.get(reverse("ping"))
@@ -302,6 +304,9 @@ class TrackerAPITests(TestCase):
             elapsed_seconds=1.0
         )
 
+        # Scrape 1: First-ever scrape with in_stock=True.
+        # Price drop alert should fire (950 <= 1000).
+        # Back in stock alert should NOT fire on the very first scrape (no prior history showing it was out of stock).
         resp = self.client.post(reverse("scrape-single", kwargs={"pk": p.id}))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
@@ -309,6 +314,45 @@ class TrackerAPITests(TestCase):
         stock_alert.refresh_from_db()
         self.assertTrue(drop_alert.notified)
         self.assertIsNotNone(drop_alert.triggered_at)
+        self.assertFalse(stock_alert.notified)
+        self.assertIsNone(stock_alert.triggered_at)
+
+        # Scrape 2: Item goes out of stock (in_stock=False)
+        mock_scrape.return_value = ScrapeResult(
+            source_product_id="601",
+            product_name="Trigger Item",
+            price=950.0,
+            currency="INR",
+            in_stock=False,
+            stock_raw="Out of stock",
+            attempts=1,
+            status="success",
+            error_message=None,
+            logs=["ok"],
+            elapsed_seconds=1.0
+        )
+        resp = self.client.post(reverse("scrape-single", kwargs={"pk": p.id}))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        stock_alert.refresh_from_db()
+        self.assertFalse(stock_alert.notified)
+
+        # Scrape 3: Item transitions back into stock (in_stock=True after being False) -> Back-in-stock alert fires!
+        mock_scrape.return_value = ScrapeResult(
+            source_product_id="601",
+            product_name="Trigger Item",
+            price=950.0,
+            currency="INR",
+            in_stock=True,
+            stock_raw="In stock",
+            attempts=1,
+            status="success",
+            error_message=None,
+            logs=["ok"],
+            elapsed_seconds=1.0
+        )
+        resp = self.client.post(reverse("scrape-single", kwargs={"pk": p.id}))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        stock_alert.refresh_from_db()
         self.assertTrue(stock_alert.notified)
         self.assertIsNotNone(stock_alert.triggered_at)
 
@@ -338,3 +382,120 @@ class TrackerAPITests(TestCase):
         # Value not integer
         resp = self.client.patch(reverse("product-detail", kwargs={"pk": p.id}), {"scrape_interval_minutes": "invalid"})
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch("tracker.views._execute_product_scrape")
+    def test_async_initial_scrape_exception_creates_failed_scrapelog(self, mock_exec):
+        from tracker.views import _async_initial_scrape
+        p = Product.objects.create(
+            source_product_id="801",
+            name="Crashing Product",
+            is_tracked=True
+        )
+        mock_exec.side_effect = RuntimeError("Playwright browser missing or OOM")
+
+        _async_initial_scrape(p.id)
+
+        # ScrapeLog must be created with status='failed'
+        self.assertEqual(p.logs.count(), 1)
+        log = p.logs.first()
+        self.assertEqual(log.status, "failed")
+        self.assertIn("Playwright browser missing or OOM", log.error_message)
+
+        # Price history must remain empty
+        self.assertEqual(p.price_history.count(), 0)
+
+        # Serializer should expose latest_status as 'failed' and latest_error
+        resp = self.client.get(reverse("product-list"))
+        data = next(x for x in resp.data if x["id"] == p.id)
+        self.assertEqual(data["latest_status"], "failed")
+        self.assertIn("Playwright browser missing or OOM", data["latest_error"])
+
+    @patch("scraper.catalog.fetch_page")
+    def test_catalog_fetch_page_retry(self, mock_fetch):
+        from scraper.catalog import fetch_page_with_retry
+        mock_fetch.side_effect = [RuntimeError("Transient network failure"), {"page": 1, "pages": 1, "items": [{"id": 99}]}]
+        data = fetch_page_with_retry(1)
+        self.assertEqual(data["page"], 1)
+        self.assertEqual(mock_fetch.call_count, 2)
+
+    @patch("tracker.views.scrape_product")
+    def test_concurrent_scrapes_prevented_by_lock(self, mock_scrape):
+        from tracker.views import scrape_lock
+        p1 = Product.objects.create(source_product_id="901", name="Product 1", is_tracked=True)
+        p2 = Product.objects.create(source_product_id="902", name="Product 2", is_tracked=True)
+
+        mock_scrape.return_value = ScrapeResult(
+            source_product_id="901",
+            product_name="Product 1",
+            price=100.0,
+            currency="INR",
+            in_stock=True,
+            stock_raw="In stock",
+            attempts=1,
+            status="success",
+            error_message=None,
+            logs=["ok"],
+            elapsed_seconds=1.0
+        )
+
+        # 1. Acquire lock to simulate an in-progress scrape
+        self.assertTrue(scrape_lock.acquire(blocking=False))
+        try:
+            # 2. Second manual scrape for Product 2 attempts while lock is held -> must return 409 Conflict
+            resp = self.client.post(reverse("scrape-single", kwargs={"pk": p2.id}))
+            self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+            self.assertIn("already in progress", resp.data["error"])
+        finally:
+            scrape_lock.release()
+
+        # 3. After releasing lock, scrape for Product 2 succeeds
+        resp = self.client.post(reverse("scrape-single", kwargs={"pk": p2.id}))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    @patch("scraper.catalog.fetch_page")
+    def test_catalog_force_refresh_triggers_new_fetches(self, mock_fetch):
+        from scraper.catalog import get_full_catalog
+        mock_fetch.return_value = {"page": 1, "pages": 1, "items": [{"id": 101, "name": "Item 101"}]}
+
+        # First call populates cache
+        res1 = get_full_catalog(force_refresh=True)
+        initial_call_count = mock_fetch.call_count
+        self.assertGreaterEqual(initial_call_count, 1)
+
+        # Second call without force_refresh uses cache (no new fetch calls)
+        res2 = get_full_catalog(force_refresh=False)
+        self.assertEqual(mock_fetch.call_count, initial_call_count)
+
+        # Third call with force_refresh=True MUST trigger new fetch_page calls
+        res3 = get_full_catalog(force_refresh=True)
+        self.assertGreater(mock_fetch.call_count, initial_call_count)
+
+    def test_genuine_price_selection_by_font_signature(self):
+        from scraper.engine import select_price_candidate
+        candidates = [
+            {"text": "₹15,999", "fontSize": "16px", "fontWeight": "400"},      # MRP / strikethrough decoy
+            {"text": "₹11,468", "fontSize": "38.4px", "fontWeight": "700"},    # Genuine price (closest to 38.4px, bold)
+            {"text": "₹12,999", "fontSize": "20px", "fontWeight": "700"},      # Sub-heading price
+        ]
+        chosen = select_price_candidate(candidates)
+        self.assertEqual(chosen["text"], "₹11,468")
+
+    def test_price_selection_fallback_with_warning_when_no_signature_match(self):
+        from scraper.engine import select_price_candidate
+        candidates = [
+            {"text": "₹1,299", "fontSize": "14px", "fontWeight": "400"},
+            {"text": "₹999", "fontSize": "12px", "fontWeight": "400"},
+        ]
+        logs = []
+        chosen = select_price_candidate(candidates, log_fn=logs.append)
+        # Falls back to index 0
+        self.assertEqual(chosen["text"], "₹1,299")
+        # Logs warning
+        self.assertTrue(any("WARNING" in msg for msg in logs))
+
+    def test_run_scrape_fails_closed_when_shared_secret_unset(self):
+        from django.test import override_settings
+        with override_settings(SCRAPE_SHARED_SECRET=""):
+            # When secret is unset in settings, any cron call must fail closed with 401
+            resp = self.client.post(reverse("scrape-run"), HTTP_X_SCRAPE_SECRET="any-secret")
+            self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)

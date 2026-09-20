@@ -23,7 +23,7 @@ async function request(endpoint, options = {}) {
 export const api = {
   getProducts: () => request('/api/products'),
   getProductDetail: (id) => request(`/api/products/${id}`),
-  searchCatalog: (q) => request(`/api/search?q=${encodeURIComponent(q)}`),
+  searchCatalog: (q, signal) => request(`/api/search?q=${encodeURIComponent(q)}`, { signal }),
   trackProduct: (sourceProductId, interval = 120, metadata = {}) =>
     request('/api/products/track', {
       method: 'POST',

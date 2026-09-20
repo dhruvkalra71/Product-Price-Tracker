@@ -130,7 +130,18 @@ class ScraperPlaywrightTestCase(unittest.IsolatedAsyncioTestCase):
 
         style_count = await page.evaluate("() => document.querySelectorAll('#anti-overlay-fix').length")
         self.assertEqual(style_count, 1)
-        await page.close()
+    async def test_genuine_price_selected_over_decoy_candidates(self):
+        from scraper.engine import select_price_candidate
+        # Candidates in non-price-first order
+        candidates = [
+            {"text": "Deal: ₹999", "fontSize": "14px", "fontWeight": "400"},
+            {"text": "₹12,499", "fontSize": "38.4px", "fontWeight": "700"},
+            {"text": "MRP: ₹15,000", "fontSize": "18px", "fontWeight": "400"},
+        ]
+        logs = []
+        chosen = select_price_candidate(candidates, log_fn=logs.append)
+        self.assertEqual(chosen["text"], "₹12,499")
+        self.assertTrue(any("Selected candidate matching genuine price signature" in l for l in logs))
 
 if __name__ == '__main__':
     unittest.main()

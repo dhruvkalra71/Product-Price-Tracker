@@ -69,9 +69,9 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# CORS configuration
+# CORS configuration: Credentials not needed for AllowAny public endpoints; disabled to prevent CSRF exposure
 CORS_ALLOW_ALL_ORIGINS = True
-CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_CREDENTIALS = False
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [],
@@ -84,8 +84,16 @@ REST_FRAMEWORK = {
     ],
 }
 
-# Shared secret for cron authentication
-SCRAPE_SHARED_SECRET = os.getenv("SCRAPE_SHARED_SECRET", "ine-tracker-cron-secret-2026")
+# Shared secret for cron authentication (fails closed if unset in production)
+SCRAPE_SHARED_SECRET = os.getenv("SCRAPE_SHARED_SECRET", "")
 
 # Concurrency limit for background automated scraping (default: 1 sequential for safe 512MB RAM usage)
 SCRAPE_MAX_CONCURRENT = int(os.getenv("SCRAPE_MAX_CONCURRENT", "1"))
+
+# Startup check: Warn if DEBUG=True in production-like environments with DATABASE_URL set
+if DEBUG and os.getenv("DATABASE_URL"):
+    import logging
+    logging.getLogger("django.security").warning(
+        "SECURITY WARNING: DEBUG=True is active while DATABASE_URL is configured. "
+        "Ensure DJANGO_DEBUG=False is set in production environments."
+    )

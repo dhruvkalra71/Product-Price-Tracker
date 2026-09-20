@@ -24,6 +24,7 @@ class ProductSerializer(serializers.ModelSerializer):
     latest_in_stock = serializers.SerializerMethodField()
     latest_stock_raw = serializers.SerializerMethodField()
     latest_status = serializers.SerializerMethodField()
+    latest_error = serializers.SerializerMethodField()
     alerts = AlertSerializer(many=True, read_only=True)
 
     class Meta:
@@ -33,7 +34,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "brand", "category", "first_seen_at", "is_tracked",
             "scrape_interval_minutes", "last_scraped_at",
             "latest_price", "latest_in_stock", "latest_stock_raw", "latest_status",
-            "alerts",
+            "latest_error", "alerts",
         ]
 
     def get_latest_price(self, obj):
@@ -48,6 +49,9 @@ class ProductSerializer(serializers.ModelSerializer):
 
     def get_latest_status(self, obj):
         return (l := obj.logs.first()) and l.status or "pending"
+
+    def get_latest_error(self, obj):
+        return (l := obj.logs.first()) and l.error_message or None
 
 class ProductDetailSerializer(ProductSerializer):
     price_history = PriceHistorySerializer(many=True, read_only=True)
