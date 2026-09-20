@@ -394,12 +394,12 @@ def _execute_product_scrape(product: Product) -> dict:
     scrape_res = scrape_product(source_product_id=product.source_product_id, headed=False)
     return _finalize_scrape(product, scrape_res)
 
-def _async_initial_scrape(product_id: int, max_attempts: int = 3, retry_delay: float = 2.0):
+def _async_initial_scrape(product_id: int, max_attempts: int = 60, retry_delay: float = 2.0):
     """
     Asynchronously executes initial scrape for a newly tracked product in a background thread.
-    Coordinates with the cross-process scrape_lock, retrying with backoff if another
-    scrape is currently executing.
-    Cleans up DB connections before and after execution to prevent connection leaks.
+    Coordinates with the cross-process scrape_lock, queueing and waiting for previous
+    scrapes to complete before executing sequentially.
+    Cleans up DB connections before, during, and after execution to prevent connection leaks.
     """
     import time
     from django.db import close_old_connections
@@ -411,11 +411,13 @@ def _async_initial_scrape(product_id: int, max_attempts: int = 3, retry_delay: f
             lock_acquired = True
             break
         if attempt < max_attempts:
-            logger.info(
-                "Scrape lock busy; initial scrape for product %s retrying in %ss (attempt %d/%d)",
-                product_id, retry_delay, attempt, max_attempts
-            )
+            if attempt % 5 == 1:
+                logger.info(
+                    "Scrape lock busy; initial scrape for product %s waiting in queue (attempt %d/%d)",
+                    product_id, attempt, max_attempts
+                )
             time.sleep(retry_delay)
+            close_old_connections()
 
     if not lock_acquired:
         logger.warning(
@@ -445,6 +447,9 @@ def _async_initial_scrape(product_id: int, max_attempts: int = 3, retry_delay: f
 
     try:
         product = Product.objects.get(id=product_id)
+        if not product.is_tracked:
+            logger.info("Product %s was untracked while waiting in queue; skipping scrape.", product_id)
+            return
         _execute_product_scrape(product)
     except Exception as e:
         logger.exception("Initial background scrape failed for product %s: %s", product_id, e)
