@@ -159,16 +159,24 @@ Because free-tier hosting (Render) sleeps after inactivity, the recurring scrape
 
 ---
 
-## Failure Recovery & Edge Case Handling
+## How the Scraper Handles Failure
 
-The tracking engine is hardened against real-world chaos and anti-scraping traps:
+The scraper module (`/scraper/engine.py`) and queue infrastructure enforce strict error handling, anti-scraping countermeasures, and resilience guarantees:
 
-1. **Store 503 In-Page Retries:** The storefront API intermittently responds with 503, causing its in-page React component to retry up to 6 times with backoff. Playwright waits up to **35 seconds** (`page.wait_for_selector(".price-success, .price-error", timeout=35000)`) so the store's internal retries succeed without timing out prematurely.
-2. **Chaos Click Recovery:** If `Xn` delays a click by 900ms, the scraper gives it **1100ms** before verifying state. If the click was truly dropped, it re-clicks up to 2 additional times.
-3. **Decoy & MRP Filtering:** Live computed CSS styles are checked. Strikethrough text (`text-decoration: line-through`) and hidden elements (`display: none`) are ignored in favor of the bold 38.4px genuine price.
-4. **Text Normalization:** Cleans unicode quirks including full-width digits (`\uff10-\uff19`), non-breaking spaces (`\u00a0`), and zero-width spaces (`\u200b`).
-5. **Worker Interruption Recovery:** If a server process terminates while a scrape job is marked `status="running"`, the worker resets stale jobs older than 5 minutes to `status="failed"` on restart.
-6. **Adaptive Polling:** The React frontend polls every **1.5s** while any product is `queued` or `running`, and drops to **8s** when all products are idle.
+1. **Human Telemetry Simulation:** Moves the cursor over `.price-block` in 10–12 discrete steps over $>600\text{ ms}$ to satisfy the store's `minMoves: 8` and `minDwellMs: 600` gating telemetry, preventing the reveal button from staying disabled.
+2. **Chaos Click Dropper & Delay Recovery (`Xn`):** The store's click handler delays 17.5% of clicks by 900ms and drops 17.5% entirely. The scraper checks state with an **1100ms threshold** so delayed clicks fire naturally, and automatically re-clicks up to 2 times if the container remains in `.price-idle`.
+3. **Store 503 In-Page Retries:** When `/api/products/{id}/price` returns `HTTP 503 (Service Unavailable)`, the storefront's in-page React component executes up to 6 internal retries with backoff. Playwright waits up to **35 seconds** (`page.wait_for_selector(".price-success, .price-error", timeout=35000)`) so the store's internal retries succeed without Playwright timing out prematurely.
+4. **Decoy & MRP Filtering:** Computes live styles on DOM elements in page context. Elements with `display: none` (`.price-value`, `.amount[data-price="true"]`), line-through retail MRPs (`text-decoration: line-through`), and promotional deal badges are rejected.
+5. **Price Font-Signature Selection & Text Normalization:** Selects genuine price elements by font weight ($\ge 700$) and font size ($2.4\text{rem} \approx 38.4\text{px}$). Cleans unicode quirks including full-width digits (`\uff10-\uff19`), non-breaking spaces (`\u00a0`), zero-width spaces (`\u200b`), and trailing tax annotations (`/- (incl. of all taxes)`).
+6. **Retry with Fresh Page Reload:** On any network error, browser crash, or `.price-error` state, the scraper retries up to 3 times with exponential backoff ($2\text{s}, 4\text{s}, 8\text{s}$) with a clean page reload.
+7. **Worker Crash & Interruption Recovery:** If a server process terminates while a scrape job is marked `status="running"`, the worker resets stale jobs older than 5 minutes to `status="failed"` upon restart.
+8. **Orphaned Product Auto-Healing:** Products tracked prior to deployments or container restarts that lack price history and pending jobs are automatically detected by `/api/products` and auto-enqueued for initial scraping.
+9. **Adaptive Polling:** The React frontend polls every **1.5s** while any product is `queued` or `running`, and drops to **8s** when all products are idle.
+10. **Honest Logging Guarantee:**
+    - Every scrape attempt creates a detailed `ScrapeLog` row with status (`success`, `retried_then_success`, or `failed`), attempt count, duration, exact error message, and DOM telemetry.
+    - `PriceHistory` is **only written when a verified price is parsed**. A failed scrape **never writes corrupt, empty, or placeholder data**.
+
+Detailed technical findings and deobfuscated storefront excerpts are documented in [`docs/site-notes.md`](docs/site-notes.md).
 
 ---
 
