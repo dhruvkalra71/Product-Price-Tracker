@@ -460,11 +460,7 @@ def _async_initial_scrape(product_id: int, max_attempts: int = 3, retry_delay: f
                         error_message=str(e),
                         http_or_dom_detail={"error": str(e), "context": "_async_initial_scrape crash"}
                     )
-                    # Keep last_scraped_at as None if no price history exists, mirroring _finalize_scrape
-                    if not product.price_history.exists():
-                        product.last_scraped_at = None
-                    else:
-                        product.last_scraped_at = now
+                    product.last_scraped_at = now if product.price_history.exists() else None
                     product.save()
             except Exception as log_err:
                 logger.exception("Failed to record error ScrapeLog for product %s: %s", product_id, log_err)
@@ -473,18 +469,11 @@ def _async_initial_scrape(product_id: int, max_attempts: int = 3, retry_delay: f
         close_old_connections()
 
 def _check_alerts(product: Product, current_price: Decimal, in_stock: bool, previous_in_stock: Optional[bool] = None):
-    active_alerts = product.alerts.filter(notified=False)
-    for alert in active_alerts:
-        triggered = False
-        if alert.type == "price_drop" and alert.threshold is not None:
-            if current_price <= alert.threshold:
-                triggered = True
-        elif alert.type == "back_in_stock":
-            # Only trigger when stock actually transitions from out-of-stock (False) to in-stock (True).
-            # If there was no previous history (first-ever scrape), do NOT treat it as "back in stock".
-            if previous_in_stock is False and in_stock is True:
-                triggered = True
-
+    for alert in product.alerts.filter(notified=False):
+        triggered = (
+            (alert.type == "price_drop" and alert.threshold is not None and current_price <= alert.threshold)
+            or (alert.type == "back_in_stock" and previous_in_stock is False and in_stock is True)
+        )
         if triggered:
             alert.triggered_at = timezone.now()
             alert.notified = True

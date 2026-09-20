@@ -186,13 +186,8 @@ export default function App() {
     return () => clearInterval(interval);
   }, [activeTab, hasPendingScrapes]);
 
-  // Search handler with active query reference and AbortController to eliminate race conditions
-  const activeSearchQueryRef = useRef('');
-
   useEffect(() => {
     const trimmed = searchQuery.trim();
-    activeSearchQueryRef.current = trimmed;
-
     if (!trimmed) {
       setSearchResults([]);
       setSearchLoading(false);
@@ -205,19 +200,11 @@ export default function App() {
     const timer = setTimeout(async () => {
       try {
         const res = await api.searchCatalog(trimmed, controller.signal);
-        // Only update if this response corresponds to the currently active query
-        if (activeSearchQueryRef.current === trimmed) {
-          setSearchResults(res);
-        }
+        setSearchResults(res);
       } catch (err) {
-        if (err.name === 'AbortError') return;
-        if (activeSearchQueryRef.current === trimmed) {
-          console.error('Search error:', err);
-        }
+        if (err.name !== 'AbortError') console.error('Search error:', err);
       } finally {
-        if (activeSearchQueryRef.current === trimmed) {
-          setSearchLoading(false);
-        }
+        if (!controller.signal.aborted) setSearchLoading(false);
       }
     }, 250);
 

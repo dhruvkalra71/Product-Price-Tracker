@@ -79,25 +79,19 @@ def get_full_catalog(max_pages: Optional[int] = None, force_refresh: bool = Fals
     global _catalog_cache, _catalog_cache_time
     now = time.time()
     
-    # 1. Check shared DB-backed catalog cache first (shared across all gunicorn workers)
+    # Fast return from shared DB cache or in-memory fallback
     if not force_refresh and max_pages is None:
         db_items = _get_db_catalog_cache()
         if db_items:
-            _catalog_cache = db_items
-            _catalog_cache_time = now
             return db_items
-        if _catalog_cache is not None and (now - _catalog_cache_time < _CATALOG_CACHE_TTL):
+        if _catalog_cache and (now - _catalog_cache_time < _CATALOG_CACHE_TTL):
             return _catalog_cache
 
     with _catalog_lock:
         if not force_refresh and max_pages is None:
             db_items = _get_db_catalog_cache()
             if db_items:
-                _catalog_cache = db_items
-                _catalog_cache_time = now
                 return db_items
-            if _catalog_cache is not None and (now - _catalog_cache_time < _CATALOG_CACHE_TTL):
-                return _catalog_cache
 
         try:
             # 1. Fetch first page with retry to discover total available pages freshly

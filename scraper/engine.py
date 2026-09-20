@@ -50,55 +50,34 @@ def clean_price_string(raw: str) -> Optional[float]:
     except ValueError:
         return None
 
-def _parse_font_size(fs_str: str) -> float:
-    m = re.search(r"([\d.]+)", str(fs_str or ""))
-    return float(m.group(1)) if m else 0.0
-
-def _parse_font_weight(fw_str: str) -> int:
-    fw_lower = str(fw_str or "").lower().strip()
-    if fw_lower in ("bold", "bolder"):
-        return 700
-    if fw_lower in ("normal", "lighter"):
-        return 400
-    m = re.search(r"(\d+)", fw_lower)
-    return int(m.group(1)) if m else 400
-
 def select_price_candidate(candidates: List[dict], log_fn=None) -> dict:
     """
-    Selects the candidate whose computed fontSize is closest to 38.4px
-    AND fontWeight is >= 700 (genuine price signature per docs/site-notes.md).
-    Falls back to position 0 and logs a warning if no candidates match or if ambiguous.
+    Selects the candidate closest to 38.4px (2.4rem) with fontWeight >= 700
+    per docs/site-notes.md. Falls back to index 0 with a warning if none match.
     """
     if not candidates:
         return {}
     if len(candidates) == 1:
         return candidates[0]
 
-    TARGET_SIZE = 38.4
-    matching_candidates = []
+    def font_score(c):
+        fs_m = re.search(r"([\d.]+)", str(c.get("fontSize", "")))
+        fs = float(fs_m.group(1)) if fs_m else 0.0
+        fw_s = str(c.get("fontWeight", "")).lower()
+        fw_m = re.search(r"\d+", fw_s)
+        fw = 700 if "bold" in fw_s else (int(fw_m.group()) if fw_m else 400)
+        is_match = fw >= 700 and abs(fs - 38.4) <= 6.0
+        return (is_match, -abs(fs - 38.4))
 
-    for c in candidates:
-        fs = _parse_font_size(c.get("fontSize", ""))
-        fw = _parse_font_weight(c.get("fontWeight", ""))
-        if fw >= 700:
-            diff = abs(fs - TARGET_SIZE)
-            if diff <= 6.0:  # Matches genuine 38.4px (2.4rem) element
-                matching_candidates.append((diff, c))
+    best = max(candidates, key=font_score)
+    if not font_score(best)[0]:
+        if log_fn:
+            log_fn(f"[WARNING] No price candidate strongly matched signature (38.4px, weight >= 700). Falling back to position 0 candidate: '{candidates[0].get('text')}'. Candidates: {candidates}")
+        return candidates[0]
 
-    if matching_candidates:
-        matching_candidates.sort(key=lambda x: x[0])
-        best_diff, best_cand = matching_candidates[0]
-        closest_count = sum(1 for d, _ in matching_candidates if abs(d - best_diff) < 0.1)
-        if closest_count > 1 and log_fn:
-            log_fn(f"[WARNING] Multiple candidates matched font signature (~38.4px, weight >= 700). Selected '{best_cand.get('text')}'.")
-        elif log_fn and best_cand != candidates[0]:
-            log_fn(f"Selected candidate matching genuine price signature ({best_cand.get('fontSize')}, weight {best_cand.get('fontWeight')}): '{best_cand.get('text')}' (overrode index 0: '{candidates[0].get('text')}')")
-        return best_cand
-
-    # None matched well - fallback to candidates[0] and log warning
-    if log_fn:
-        log_fn(f"[WARNING] No price candidate strongly matched signature (38.4px, weight >= 700). Falling back to position 0 candidate: '{candidates[0].get('text')}'. Candidates: {candidates}")
-    return candidates[0]
+    if log_fn and best != candidates[0]:
+        log_fn(f"Selected candidate matching genuine price signature ({best.get('fontSize')}, weight {best.get('fontWeight')}): '{best.get('text')}' (overrode index 0: '{candidates[0].get('text')}')")
+    return best
 
 COOKIE_SUPPRESSION_CSS = ".cookie-overlay { display: none !important; pointer-events: none !important; }"
 
