@@ -446,70 +446,63 @@ export default function App() {
                         )}
                       </div>
                     </div>
+
+                    {/* Scrape Frequency Selector */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.8rem', margin: '0.6rem 0' }}>
+                      <span style={{ color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        ⏱️ Check:
+                      </span>
+                      <select
+                        className="interval-select"
+                        value={
+                          INTERVAL_PRESETS.some((opt) => opt.value === p.scrape_interval_minutes)
+                            ? p.scrape_interval_minutes
+                            : 'custom'
+                        }
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (val === 'custom') {
+                            const input = prompt('Enter scrape interval in minutes (minimum 5):', p.scrape_interval_minutes || 120);
+                            if (input !== null) handleUpdateInterval(p.id, input);
+                          } else {
+                            handleUpdateInterval(p.id, val);
+                          }
+                        }}
+                      >
+                        {INTERVAL_PRESETS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                        {!INTERVAL_PRESETS.some((opt) => opt.value === p.scrape_interval_minutes) && (
+                          <option value="custom">Custom ({p.scrape_interval_minutes}m)</option>
+                        )}
+                        {INTERVAL_PRESETS.some((opt) => opt.value === p.scrape_interval_minutes) && (
+                          <option value="custom">Custom...</option>
+                        )}
+                      </select>
+                    </div>
+
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+                      Last updated:{' '}
+                      {p.last_scraped_at ? new Date(p.last_scraped_at).toLocaleTimeString() : 'Never'}
+                    </div>
                   </div>
 
-                  <div>
-                    {/* Action buttons with clear hierarchy */}
-                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
-                      <button className="btn btn-primary btn-sm" onClick={() => handleOpenDetail(p)}>
-                        View History & Logs
-                      </button>
-                      <button
-                        className="btn btn-secondary btn-sm"
-                        disabled={scrapingId === p.id}
-                        onClick={() => handleManualScrape(p.id)}
-                      >
-                        {scrapingId === p.id ? 'Scraping...' : 'Scrape Now'}
-                      </button>
-                      <button
-                        className="btn-ghost-danger"
-                        onClick={() => handleUntrack(p.id)}
-                        title="Stop tracking this product"
-                      >
-                        🗑️ Untrack
-                      </button>
-                    </div>
-
-                    {/* Muted footer row for metadata */}
-                    <div className="card-footer-meta">
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <span>⏱️ Check:</span>
-                        <select
-                          className="interval-select"
-                          style={{ fontSize: '0.7rem', padding: '0.15rem 0.35rem' }}
-                          value={
-                            INTERVAL_PRESETS.some((opt) => opt.value === p.scrape_interval_minutes)
-                              ? p.scrape_interval_minutes
-                              : 'custom'
-                          }
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            if (val === 'custom') {
-                              const input = prompt('Enter scrape interval in minutes (minimum 5):', p.scrape_interval_minutes || 120);
-                              if (input !== null) handleUpdateInterval(p.id, input);
-                            } else {
-                              handleUpdateInterval(p.id, val);
-                            }
-                          }}
-                        >
-                          {INTERVAL_PRESETS.map((opt) => (
-                            <option key={opt.value} value={opt.value}>
-                              {opt.label.replace('Every ', '')}
-                            </option>
-                          ))}
-                          <option value="custom">
-                            {INTERVAL_PRESETS.some((opt) => opt.value === p.scrape_interval_minutes)
-                              ? 'Custom...'
-                              : `Custom (${p.scrape_interval_minutes}m)`}
-                          </option>
-                        </select>
-                      </div>
-
-                      <div>
-                        Last updated:{' '}
-                        {p.last_scraped_at ? new Date(p.last_scraped_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Never'}
-                      </div>
-                    </div>
+                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    <button className="btn btn-primary btn-sm" onClick={() => handleOpenDetail(p)}>
+                      View History & Logs
+                    </button>
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      disabled={scrapingId === p.id}
+                      onClick={() => handleManualScrape(p.id)}
+                    >
+                      {scrapingId === p.id ? 'Scraping...' : 'Scrape Now'}
+                    </button>
+                    <button className="btn btn-danger btn-sm" onClick={() => handleUntrack(p.id)}>
+                      Untrack
+                    </button>
                   </div>
                 </div>
               );

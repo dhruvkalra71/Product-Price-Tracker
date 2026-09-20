@@ -184,28 +184,6 @@ body {
   background: var(--danger-bg);
 }
 
-.btn-ghost-danger {
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--danger);
-  padding: 0.25rem 0.5rem;
-  font-size: 0.75rem;
-  font-weight: 500;
-  border-radius: var(--radius);
-  cursor: pointer;
-  opacity: 0.75;
-  transition: all 0.15s ease;
-  font-family: inherit;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-}
-.btn-ghost-danger:hover {
-  opacity: 1;
-  background: var(--danger-bg);
-  border-color: var(--danger);
-}
-
 .btn-outline-primary {
   background: transparent;
   border: 1px solid var(--primary);
@@ -261,18 +239,6 @@ body {
   justify-content: space-between;
   align-items: flex-start;
   margin-bottom: 0.5rem;
-}
-
-.card-footer-meta {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: 0.85rem;
-  padding-top: 0.65rem;
-  border-top: 1px solid var(--border);
-  font-size: 0.725rem;
-  color: var(--text-muted);
-  opacity: 0.85;
 }
 
 .badge {
@@ -334,13 +300,12 @@ body {
   box-shadow: 0 1px 3px rgba(34, 197, 94, 0.3);
 }
 
-/* Price display - focal point */
+/* Price display */
 .price-tag {
-  font-size: 2rem;
-  font-weight: 800;
+  font-size: 1.75rem;
+  font-weight: 700;
   color: var(--text-main);
-  letter-spacing: -0.03em;
-  line-height: 1.15;
+  letter-spacing: -0.02em;
 }
 
 /* Tables */
