@@ -1,6 +1,7 @@
 from decimal import Decimal
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework import status
 from unittest.mock import patch, AsyncMock
@@ -93,15 +94,25 @@ class TrackerAPITests(TestCase):
         self.assertEqual(product.price_history.count(), 0)
 
     def test_untrack_product(self):
+        from .models import Alert
         product = Product.objects.create(
             source_product_id="10",
             name="Test Item",
-            is_tracked=True
+            is_tracked=True,
+            last_scraped_at=timezone.now()
         )
+        log = ScrapeLog.objects.create(product=product, status="success", attempt_count=1)
+        PriceHistory.objects.create(product=product, price=Decimal("199.99"), in_stock=True, scrape_log=log)
+        Alert.objects.create(product=product, type="price_drop", threshold=Decimal("150.00"))
+
         resp = self.client.delete(reverse("product-untrack", kwargs={"pk": product.id}))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         product.refresh_from_db()
         self.assertFalse(product.is_tracked)
+        self.assertIsNone(product.last_scraped_at)
+        self.assertEqual(product.price_history.count(), 0)
+        self.assertEqual(product.logs.count(), 0)
+        self.assertEqual(product.alerts.count(), 0)
 
     def test_cron_scrape_run_unauthorized_without_secret(self):
         resp = self.client.post(reverse("scrape-run"))

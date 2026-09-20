@@ -112,8 +112,13 @@ class TrackProductView(APIView):
 class UntrackProductView(APIView):
     def delete(self, request, pk):
         product = get_object_or_404(Product, pk=pk)
-        product.is_tracked = False
-        product.save(update_fields=["is_tracked"])
+        with transaction.atomic():
+            product.is_tracked = False
+            product.last_scraped_at = None
+            product.save(update_fields=["is_tracked", "last_scraped_at"])
+            product.price_history.all().delete()
+            product.logs.all().delete()
+            product.alerts.all().delete()
         return Response({"status": "untracked", "id": pk})
 
 class ProductDetailView(APIView):
